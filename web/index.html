@@ -1,0 +1,1052 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Simple Job Scheduler</title>
+  <script src="/tailwindcss.js"></script>
+  <script src="/cron-formatter.js"></script>
+  <script src="/vue.global.prod.js"></script>
+</head>
+
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <div id="app" class="max-w-6xl mx-auto p-6">
+    <header class="flex flex-wrap items-center justify-between gap-4 mb-8 border-b border-slate-800 pb-4">
+      <h1 class="text-2xl font-semibold text-cyan-400">{{ t('app_title') }}</h1>
+      <div class="flex items-center gap-3">
+        <select v-model="lang" @change="saveLang"
+          class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm">
+          <option value="en">{{ t('lang_en') }}</option>
+          <option value="ru">{{ t('lang_ru') }}</option>
+        </select>
+        <nav class="flex gap-2 text-sm">
+          <button v-for="item in nav" :key="item.id" @click="view = item.id"
+            :class="view === item.id ? 'bg-cyan-600 text-white' : 'bg-slate-800 hover:bg-slate-700'"
+            class="px-3 py-1 rounded">{{ t(item.label) }}</button>
+        </nav>
+      </div>
+    </header>
+
+    <p v-if="error" class="mb-4 text-red-400 text-sm">{{ error }}</p>
+    <p v-if="toast" class="mb-4 text-emerald-400 text-sm">{{ toast }}</p>
+
+    <!-- Dashboard -->
+    <section v-if="view === 'dashboard'">
+      <h2 class="text-xl mb-2">{{ t('dashboard_title') }}</h2>
+      <p v-if="dashboardSummary" class="text-sm text-slate-400 mb-4">{{ dashboardSummary }}</p>
+      <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-8">
+        <div v-for="card in dashCards" :key="card.key"
+          class="bg-slate-900 border rounded-lg p-4"
+          :class="card.key === 'failed_jobs' && (dashboard.failed_jobs > 0) ? 'border-red-800/70' : 'border-slate-800'">
+          <div class="text-slate-400 text-sm">{{ t(card.label) }}</div>
+          <div class="text-2xl font-bold mt-1"
+            :class="card.key === 'failed_jobs' && (dashboard.failed_jobs > 0) ? 'text-red-400' : (card.key === 'succeeded_executions' ? 'text-emerald-400' : '')">
+            {{ dashboard[card.key] ?? '—' }}
+          </div>
+        </div>
+      </div>
+      <h3 class="text-lg mb-2">{{ t('recent_executions') }}</h3>
+      <log-table :logs="dashboard.recent_logs || []" :jobs-by-id="jobsById" :t="t"
+        :fmt-date="fmt" :fmt-duration="fmtDuration" :preview-max-bytes="previewMaxBytes" detailed></log-table>
+    </section>
+
+    <!-- Jobs list -->
+    <section v-if="view === 'jobs'">
+      <div class="flex flex-wrap justify-between items-center gap-3 mb-4">
+        <h2 class="text-xl">{{ t('jobs_title') }}</h2>
+        <button @click="newJob" class="bg-cyan-600 hover:bg-cyan-500 px-4 py-2 rounded text-sm">{{ t('nav_create')
+          }}</button>
+      </div>
+      <div v-if="jobs.length" class="mb-4 p-3 bg-slate-900 border border-slate-800 rounded-lg space-y-3">
+        <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-2 text-sm">
+          <label class="block">
+            <span class="text-slate-400 text-xs">{{ t('filter_name') }}</span>
+            <input v-model="jobFilters.name" type="search" :placeholder="t('filter_name_placeholder')"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" />
+          </label>
+          <label class="block">
+            <span class="text-slate-400 text-xs">{{ t('filter_group') }}</span>
+            <select v-model="jobFilters.group"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm">
+              <option value="">{{ t('filter_group_all') }}</option>
+              <option value="__none__">{{ t('filter_group_none') }}</option>
+              <option v-for="g in jobGroupNames" :key="g" :value="g">{{ g }}</option>
+            </select>
+          </label>
+          <label class="block">
+            <span class="text-slate-400 text-xs">{{ t('filter_created_from') }}</span>
+            <input v-model="jobFilters.createdFrom" type="date"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" />
+          </label>
+          <label class="block">
+            <span class="text-slate-400 text-xs">{{ t('filter_created_to') }}</span>
+            <input v-model="jobFilters.createdTo" type="date"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" />
+          </label>
+        </div>
+        <div class="flex flex-wrap items-end gap-2 text-sm">
+          <label class="block">
+            <span class="text-slate-400 text-xs pr-2">{{ t('filter_sort') }}</span>
+            <select v-model="jobFilters.sortBy"
+              class="mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm">
+              <option value="created_at">{{ t('sort_created') }}</option>
+              <option value="name">{{ t('sort_name') }}</option>
+            </select>
+          </label>
+          <label class="block">
+            <span class="text-slate-400 text-xs pr-2">{{ t('filter_sort_dir') }}</span>
+            <select v-model="jobFilters.sortDir"
+              class="mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm">
+              <option value="desc">{{ t('sort_desc') }}</option>
+              <option value="asc">{{ t('sort_asc') }}</option>
+            </select>
+          </label>
+          <button type="button" @click="resetJobFilters"
+            class="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded text-sm">{{ t('filter_reset') }}</button>
+          <template v-if="canToggleGroup">
+            <button type="button" @click="setGroupEnabled(true)"
+              class="bg-emerald-900/50 hover:bg-emerald-800/60 border border-emerald-800 px-3 py-1.5 rounded text-sm text-emerald-300">
+              {{ t('btn_enable_group') }}
+            </button>
+            <button type="button" @click="setGroupEnabled(false)"
+              class="bg-slate-800 hover:bg-slate-700 border border-slate-600 px-3 py-1.5 rounded text-sm text-slate-300">
+              {{ t('btn_disable_group') }}
+            </button>
+          </template>
+        </div>
+        <p class="text-[11px] text-slate-500">{{ jobsFilterSummary }}</p>
+      </div>
+      <p v-if="!jobs.length" class="text-slate-500">{{ t('no_jobs') }}</p>
+      <p v-else-if="!filteredJobs.length" class="text-slate-500">{{ t('jobs_filter_empty') }}</p>
+      <div v-else class="overflow-x-auto">
+        <table class="w-full text-sm border-collapse">
+          <thead>
+            <tr class="text-left text-slate-400 border-b border-slate-800">
+              <th class="py-2 pr-4">{{ t('job_name') }}</th>
+              <th class="py-2 pr-4">{{ t('job_group') }}</th>
+              <th class="py-2 pr-4">{{ t('job_created') }}</th>
+              <th class="py-2 pr-4">{{ t('job_state') }}</th>
+              <th class="py-2 pr-4">{{ t('job_next') }}</th>
+              <th class="py-2 pr-4">{{ t('job_last') }}</th>
+              <th class="py-2 pr-4">{{ t('job_last_result') }}</th>
+              <th class="py-2">{{ t('job_actions') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="job in filteredJobs" :key="job.id" class="border-b border-slate-900">
+              <td class="py-2 pr-4 font-medium">{{ job.name }}</td>
+              <td class="py-2 pr-4 text-slate-400">{{ jobGroupLabel(job.job_group) }}</td>
+              <td class="py-2 pr-4 text-slate-400 whitespace-nowrap">{{ fmt(job.created_at) }}</td>
+              <td class="py-2 pr-4"><span :class="stateClass(job.state)">{{ t('state_' + job.state) }}</span></td>
+              <td class="py-2 pr-4 text-slate-400">
+                <div>{{ fmt(job.next_run_at) }}</div>
+                <div v-if="job.schedule_type === 'cron'" class="text-[11px] text-slate-500 mt-0.5 truncate max-w-xs"
+                  :title="cronDescribe(job.schedule_value)">
+                  {{ cronDescribe(job.schedule_value) }}
+                </div>
+              </td>
+              <td class="py-2 pr-4 text-slate-400">{{ fmt(job.last_run_at) }}</td>
+              <td class="py-2 pr-4"><span v-if="job.last_status" :class="lastStatusClass(job.last_status)">{{ lastStatusLabel(job.last_status) }}</span><span v-else class="text-slate-500">{{ t('job_never_run') }}</span></td>
+              <td class="py-2 flex flex-wrap gap-2">
+                <button @click="editJob(job)" class="text-cyan-400 hover:underline">{{ t('btn_edit') }}</button>
+                <button @click="runJob(job.id)" class="text-emerald-400 hover:underline">{{ t('btn_run') }}</button>
+                <button @click="removeJob(job.id)" class="text-red-400 hover:underline">{{ t('btn_delete') }}</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Create / Edit -->
+    <section v-if="view === 'form'" class="max-w-7xl">
+      <h2 class="text-lg mb-2">{{ editingId ? t('edit_job_title') : t('create_job_title') }}</h2>
+      <form @submit.prevent="saveJob" class="space-y-3">
+        <div class="grid lg:grid-cols-2 gap-3 items-start">
+          <div class="space-y-3">
+        <fieldset class="bg-slate-900 border border-slate-800 rounded-md p-2.5 space-y-2">
+          <legend class="text-sm text-cyan-400 px-1">{{ t('section_general') }}</legend>
+          <label class="block text-sm"><span class="text-slate-400">{{ t('field_name') }}</span>
+            <input v-model="form.name" required
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" /></label>
+          <label class="block text-sm"><span class="text-slate-400">{{ t('field_job_group') }}</span>
+            <input v-model="form.job_group" :list="'job-group-datalist-' + lang" :placeholder="t('field_job_group_placeholder')"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" />
+            <datalist :id="'job-group-datalist-' + lang">
+              <option v-for="g in jobGroupNames" :key="g" :value="g"></option>
+            </datalist></label>
+          <field-hint :text="t('help_job_group')"></field-hint>
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="form.enabled" /> {{ t('field_enabled') }}</label>
+          <field-hint :text="t('help_enabled')"></field-hint>
+          <label class="block text-sm"><span class="text-slate-400">{{ t('field_description') }}</span>
+            <textarea v-model="form.description" rows="2"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm"></textarea></label>
+        </fieldset>
+
+        <fieldset class="bg-slate-900 border border-slate-800 rounded-md p-2.5 space-y-2">
+          <legend class="text-sm text-cyan-400 px-1">{{ t('section_schedule') }}</legend>
+          <field-hint :text="t('help_schedule_intro')"></field-hint>
+          <label class="block text-sm"><span class="text-slate-400">{{ t('field_schedule_type') }}</span>
+            <select v-model="form.schedule_type"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm">
+              <option value="interval">{{ t('schedule_interval') }}</option>
+              <option value="cron">{{ t('schedule_cron') }}</option>
+              <option value="one_time">{{ t('schedule_onetime') }}</option>
+            </select></label>
+          <field-hint v-if="form.schedule_type === 'interval'" :text="t('help_schedule_interval')"></field-hint>
+          <field-hint v-if="form.schedule_type === 'one_time'" :text="t('help_schedule_onetime')"></field-hint>
+          <label v-if="form.schedule_type === 'one_time'" class="block text-sm">
+            <span class="text-slate-400">{{ t('field_schedule_datetime') }}</span>
+            <input type="datetime-local" v-model="oneTimeLocal" required :min="minOneTimeLocal"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm [color-scheme:dark]" />
+            <field-hint :text="t('help_one_time_picker')"></field-hint>
+            <p v-if="oneTimeUtcPreview" class="text-[11px] text-slate-500 mt-0.5">
+              {{ t('one_time_utc_label') }}: <span class="font-mono text-slate-400">{{ oneTimeUtcPreview }}</span>
+            </p>
+          </label>
+          <label v-else class="block text-sm"><span class="text-slate-400">{{ t('field_schedule_value') }}</span>
+            <div class="flex gap-1.5 mt-0.5">
+              <input v-model="form.schedule_value" required :placeholder="scheduleHint"
+                class="flex-1 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs" />
+              <button v-if="form.schedule_type === 'cron'" type="button" @click="normalizeCron"
+                class="shrink-0 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded px-2 py-1.5 text-xs">
+                {{ t('cron_btn_normalize') }}
+              </button>
+            </div>
+          </label>
+          <template v-if="form.schedule_type === 'cron'">
+            <div v-if="cronPreview.parts || !cronPreview.valid" class="rounded border border-slate-800 bg-slate-950/80 p-2 space-y-1">
+              <div v-if="cronPreview.parts" class="grid grid-cols-5 gap-0.5 text-center">
+                <div v-for="(part, i) in cronPreview.parts" :key="i" class="min-w-0">
+                  <div class="text-[9px] uppercase text-slate-500 truncate">{{ cronPreview.fieldLabels[i] }}</div>
+                  <div class="font-mono text-xs text-slate-200 truncate" :title="part">{{ part }}</div>
+                </div>
+              </div>
+              <p class="text-xs leading-snug" :class="cronPreview.valid ? 'text-emerald-400' : 'text-red-400'">
+                {{ cronPreview.valid ? cronPreview.description : cronPreview.error }}
+              </p>
+              <p v-if="cronPreview.valid && cronPreview.nextRuns.length" class="text-[11px] text-slate-400 font-mono">
+                {{ t('cron_next_runs') }}: {{ fmtUtc(cronPreview.nextRuns[0]) }}
+              </p>
+            </div>
+            <collapse-panel :title="t('cron_help_title')" v-model:open="showCronHelp">
+              <field-hint :text="t('cron_help_format')"></field-hint>
+              <p class="text-[11px] text-slate-400">{{ t('cron_utc_note') }}</p>
+              <div class="text-[11px] text-slate-400">{{ t('cron_help_examples') }}</div>
+              <div class="space-y-1">
+                <div v-for="ex in cronExamples" :key="ex.expr"
+                  class="flex flex-wrap items-center gap-1.5 text-[11px] rounded border border-slate-800 bg-slate-900/60 px-1.5 py-1">
+                  <code class="font-mono text-cyan-300/90 shrink-0">{{ ex.expr }}</code>
+                  <span class="text-slate-400 flex-1 min-w-0">{{ t(ex.descKey) }}</span>
+                  <button type="button" @click="applyCronExample(ex.expr)"
+                    class="text-cyan-400 hover:text-cyan-300 hover:underline shrink-0">{{ t('btn_use_example') }}</button>
+                </div>
+              </div>
+              <div v-if="cronPreview.valid && cronPreview.nextRuns.length > 1" class="pt-1 border-t border-slate-800">
+                <div class="text-[11px] text-slate-400 mb-0.5">{{ t('cron_next_runs') }}</div>
+                <ul class="text-[11px] text-slate-300 space-y-0 font-mono">
+                  <li v-for="(run, idx) in cronPreview.nextRuns" :key="idx">{{ fmtUtc(run) }}</li>
+                </ul>
+              </div>
+            </collapse-panel>
+          </template>
+        </fieldset>
+
+        <fieldset class="bg-slate-900 border border-slate-800 rounded-md p-2.5 space-y-2">
+          <legend class="text-sm text-cyan-400 px-1">{{ t('section_retry') }}</legend>
+          <field-hint :text="t('help_retry_section')"></field-hint>
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="form.retry_enabled" /> {{ t('field_retry_enabled') }}</label>
+          <div class="grid grid-cols-2 gap-2">
+            <label class="block text-sm"><span class="text-slate-400">{{ t('field_max_retries') }}</span>
+              <input type="number" v-model.number="form.max_retries" min="0"
+                class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" /></label>
+            <label class="block text-sm"><span class="text-slate-400">{{ t('field_retry_interval') }}</span>
+              <input type="number" v-model.number="form.retry_interval_seconds" min="1"
+                class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" /></label>
+          </div>
+          <field-hint :text="t('help_max_retries')"></field-hint>
+          <field-hint :text="t('help_retry_interval')"></field-hint>
+        </fieldset>
+          </div>
+
+          <div class="space-y-3">
+        <fieldset class="bg-slate-900 border border-slate-800 rounded-md p-2.5 space-y-2">
+          <legend class="text-sm text-cyan-400 px-1">{{ t('section_fetch') }}</legend>
+          <field-hint :text="t('help_fetch_section')"></field-hint>
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="form.fetch_enabled" /> {{ t('field_fetch_enabled') }}</label>
+          <div class="grid grid-cols-2 gap-2">
+            <label class="block text-sm"><span class="text-slate-400">{{ t('field_fetch_method') }}</span>
+              <select v-model="form.fetch_method"
+                class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm">
+                <option>GET</option>
+                <option>POST</option>
+              </select></label>
+            <label class="block text-sm"><span class="text-slate-400">{{ t('field_fetch_url') }}</span>
+              <input v-model="form.fetch_url"
+                class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" /></label>
+          </div>
+          <label class="block text-sm"><span class="text-slate-400">{{ t('field_fetch_headers') }}</span>
+            <textarea v-model="form.fetch_headers" rows="2"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
+          <field-hint :text="t('help_fetch_headers')"></field-hint>
+          <label class="block text-sm"><span class="text-slate-400">{{ t('field_fetch_body') }}</span>
+            <textarea v-model="form.fetch_body" rows="2"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
+          <field-hint :text="t('help_fetch_body')"></field-hint>
+        </fieldset>
+
+        <fieldset class="bg-slate-900 border border-slate-800 rounded-md p-2.5 space-y-2">
+          <legend class="text-sm text-cyan-400 px-1">{{ t('section_transform') }}</legend>
+          <field-hint :text="t('help_transform_section')"></field-hint>
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="form.transform_enabled" /> {{ t('field_transform_enabled') }}</label>
+          <label class="block text-sm"><span class="text-slate-400">{{ t('field_transform_script') }}</span>
+            <textarea v-model="form.transform_script" rows="4"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
+          <collapse-panel :title="t('help_transform_examples')" v-model:open="showTransformExamples">
+            <field-hint :text="t('help_transform_rules')"></field-hint>
+            <div v-for="ex in transformExamples" :key="ex.id"
+              class="rounded border border-slate-800 bg-slate-900/50 p-1.5 space-y-1">
+              <div class="text-xs text-slate-200">{{ t(ex.titleKey) }}</div>
+              <div class="text-[11px] text-slate-400">{{ t(ex.descKey) }}</div>
+              <pre class="text-[11px] font-mono text-slate-300 bg-slate-950 rounded p-1.5 overflow-x-auto whitespace-pre-wrap">{{ ex.code }}</pre>
+              <button type="button" @click="applyTransformExample(ex.code)"
+                class="text-[11px] text-cyan-400 hover:text-cyan-300 hover:underline">{{ t('btn_insert_example') }}</button>
+            </div>
+          </collapse-panel>
+        </fieldset>
+
+        <fieldset class="bg-slate-900 border border-slate-800 rounded-md p-2.5 space-y-2">
+          <legend class="text-sm text-cyan-400 px-1">{{ t('section_send') }}</legend>
+          <field-hint :text="t('help_send_section')"></field-hint>
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="form.send_enabled" /> {{ t('field_send_enabled') }}</label>
+          <div class="grid grid-cols-2 gap-2">
+            <label class="block text-sm"><span class="text-slate-400">{{ t('field_send_method') }}</span>
+              <select v-model="form.send_method"
+                class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm">
+                <option>POST</option>
+                <option>PUT</option>
+              </select></label>
+            <label class="block text-sm"><span class="text-slate-400">{{ t('field_send_url') }}</span>
+              <input v-model="form.send_url"
+                class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" /></label>
+          </div>
+          <label class="block text-sm"><span class="text-slate-400">{{ t('field_send_headers') }}</span>
+            <textarea v-model="form.send_headers" rows="2"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
+          <label class="block text-sm"><span class="text-slate-400">{{ t('field_send_body') }}</span>
+            <textarea v-model="form.send_body_template" rows="2" :placeholder="payloadPlaceholder"
+              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
+          <field-hint :text="t('help_send_body')"></field-hint>
+        </fieldset>
+          </div>
+        </div>
+
+        <div class="flex gap-2 pt-1">
+          <button type="submit" class="bg-cyan-600 hover:bg-cyan-500 px-4 py-1.5 rounded text-sm">{{ t('btn_save') }}</button>
+          <button type="button" @click="view = 'jobs'" class="bg-slate-800 hover:bg-slate-700 px-4 py-1.5 rounded text-sm">{{ t('btn_cancel') }}</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Logs -->
+    <section v-if="view === 'logs'">
+      <h2 class="text-xl mb-4">{{ t('logs_title') }}</h2>
+      <label class="block mb-4 text-sm">
+        <span class="text-slate-400">{{ t('log_job') }}</span>
+        <select v-model="logsJobId" @change="loadLogs"
+          class="ml-2 bg-slate-900 border border-slate-700 rounded px-2 py-1">
+          <option value="">{{ t('select_job_logs') }}</option>
+          <option v-for="j in jobs" :key="j.id" :value="j.id">{{ j.name }}</option>
+        </select>
+      </label>
+      <p v-if="!logsJobId" class="text-slate-500">{{ t('select_job_logs') }}</p>
+      <log-table v-else :logs="logs" :jobs-by-id="jobsById" :t="t"
+        :fmt-date="fmt" :fmt-duration="fmtDuration" :preview-max-bytes="previewMaxBytes" detailed></log-table>
+    </section>
+  </div>
+
+  <script>
+    const FieldHint = {
+      props: ['text'],
+      template: `<p v-if="text" class="text-[11px] text-slate-500 leading-snug">{{ text }}</p>`,
+    };
+
+    const CollapsePanel = {
+      props: ['title', 'open'],
+      emits: ['update:open'],
+      template: `
+        <div class="rounded border border-slate-800 bg-slate-950/60">
+          <button type="button" @click="$emit('update:open', !open)"
+            class="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-left text-xs text-cyan-400/90 hover:bg-slate-900/50">
+            <span>{{ title }}</span>
+            <span class="text-slate-500 text-[10px] shrink-0">{{ open ? '▼' : '▶' }}</span>
+          </button>
+          <div v-show="open" class="px-2 pb-2 pt-1 space-y-1.5 border-t border-slate-800">
+            <slot></slot>
+          </div>
+        </div>
+      `,
+    };
+
+    const DETAILS_PREVIEW_LEN = 120;
+
+    function formatDetailsBody(raw) {
+      if (raw == null) return '';
+      const s = String(raw).trim();
+      if (!s) return '';
+      try {
+        return JSON.stringify(JSON.parse(s), null, 2);
+      } catch {
+        return String(raw);
+      }
+    }
+
+    function truncateDetailsText(text, maxLen) {
+      if (!text) return '—';
+      if (text.length <= maxLen) return text;
+      return text.slice(0, maxLen) + '…';
+    }
+
+    const LogTable = {
+      props: ['logs', 'jobsById', 't', 'detailed', 'fmtDate', 'fmtDuration', 'previewMaxBytes'],
+      data() {
+        return {
+          detailsModal: { open: false, title: '', body: '', truncated: false },
+        };
+      },
+      template: `
+        <div v-if="!logs.length" class="text-slate-500 text-sm">{{ t('no_logs') }}</div>
+        <template v-else>
+        <table class="w-full text-sm border-collapse">
+          <thead><tr class="text-left text-slate-400 border-b border-slate-800">
+            <th class="py-2 pr-3">{{ t('log_job') }}</th>
+            <th class="py-2 pr-3">{{ t('log_started') }}</th>
+            <th class="py-2 pr-3">{{ t('log_finished') }}</th>
+            <th class="py-2 pr-3">{{ t('log_status') }}</th>
+            <th v-if="detailed" class="py-2 pr-3">{{ t('log_fetch') }}</th>
+            <th v-if="detailed" class="py-2 pr-3">{{ t('log_send') }}</th>
+            <th class="py-2 pr-3">{{ t('log_duration') }}</th>
+            <th class="py-2">{{ t('log_details') }}</th>
+          </tr></thead>
+          <tbody>
+            <tr v-for="log in logs" :key="log.id" class="border-b border-slate-900">
+              <td class="py-2 pr-3 font-medium">{{ jobName(log.job_id) }}</td>
+              <td class="py-2 pr-3 text-slate-400 whitespace-nowrap">{{ formatDate(log.started_at) }}</td>
+              <td class="py-2 pr-3 text-slate-400 whitespace-nowrap">{{ formatDate(log.finished_at) }}</td>
+              <td class="py-2 pr-3"><span :class="statusClass(log.status)">{{ statusLabel(log.status) }}</span></td>
+              <td v-if="detailed" class="py-2 pr-3">{{ log.fetch_status ?? '—' }}</td>
+              <td v-if="detailed" class="py-2 pr-3">{{ log.send_status ?? '—' }}</td>
+              <td class="py-2 pr-3 whitespace-nowrap">{{ formatDuration(log.duration_ms) }}</td>
+              <td class="py-2 text-xs max-w-md">
+                <span class="break-words" :class="detailsClass(log)">{{ detailsPreview(log) }}</span>
+                <button v-if="hasDetails(log)" type="button" @click="openDetails(log)"
+                  class="mt-1 block text-cyan-400 hover:underline">{{ t('btn_details_more') }}</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="detailsModal.open" class="fixed inset-0 z-50 flex items-center justify-center p-4"
+          role="dialog" aria-modal="true">
+          <div class="absolute inset-0 bg-black/70" @click="closeDetails"></div>
+          <div class="relative bg-slate-900 border border-slate-700 rounded-lg max-w-4xl w-full max-h-[85vh] flex flex-col shadow-xl"
+            @click.stop>
+            <div class="flex justify-between items-center gap-3 px-4 py-3 border-b border-slate-800">
+              <h4 class="font-medium text-slate-200 text-sm">{{ detailsModal.title }}</h4>
+              <button type="button" @click="closeDetails" class="text-slate-400 hover:text-white text-xl leading-none px-1"
+                :aria-label="t('btn_close')">×</button>
+            </div>
+            <div class="px-4 pt-3 space-y-2 shrink-0">
+              <p class="text-[11px] text-slate-500 leading-snug">{{ previewInfoText() }}</p>
+              <p v-if="detailsModal.truncated" class="text-xs text-amber-200/90 bg-amber-950/50 border border-amber-800/60 rounded px-3 py-2 leading-snug">{{ truncatedNoticeText() }}</p>
+            </div>
+            <pre class="px-4 pb-4 overflow-auto text-xs font-mono whitespace-pre-wrap break-words text-slate-300 flex-1 min-h-0">{{ detailsModal.body }}</pre>
+            <div class="px-4 py-2 border-t border-slate-800 flex justify-end">
+              <button type="button" @click="closeDetails"
+                class="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded text-sm">{{ t('btn_close') }}</button>
+            </div>
+          </div>
+        </div>
+        </template>
+      `,
+      methods: {
+        jobName(id) { return this.jobsById[id]?.name || id.slice(0, 8); },
+        formatDate(iso) { return this.fmtDate ? this.fmtDate(iso) : (iso || '—'); },
+        formatDuration(ms) { return this.fmtDuration ? this.fmtDuration(ms) : (ms ?? '—'); },
+        statusLabel(status) {
+          if (!status) return '—';
+          const key = 'exec_status_' + status;
+          const label = this.t(key);
+          return label === key ? status : label;
+        },
+        statusClass(status) {
+          if (status === 'succeeded') return 'text-emerald-400 font-medium';
+          if (status === 'failed') return 'text-red-400 font-medium';
+          return 'text-slate-300';
+        },
+        detailsRaw(log) {
+          if (log.status === 'failed') return log.error_message || '';
+          if (log.status === 'succeeded') return log.response_preview || '';
+          return log.error_message || log.response_preview || '';
+        },
+        hasDetails(log) {
+          const raw = this.detailsRaw(log);
+          return Boolean(raw && String(raw).trim());
+        },
+        detailsPreview(log) {
+          const raw = this.detailsRaw(log);
+          if (!raw || !String(raw).trim()) return '—';
+          return truncateDetailsText(raw, DETAILS_PREVIEW_LEN);
+        },
+        detailsClass(log) {
+          if (log.status === 'failed') return 'text-red-400';
+          if (log.status === 'succeeded') return 'text-slate-400';
+          return 'text-slate-500';
+        },
+        fillTemplate(key) {
+          const max = String(this.previewMaxBytes ?? 500);
+          return (this.t(key) || key).replace(/\{\{max\}\}/g, max);
+        },
+        previewInfoText() {
+          return this.fillTemplate('log_details_preview_info');
+        },
+        truncatedNoticeText() {
+          return this.fillTemplate('log_details_truncated_notice');
+        },
+        isStoredPreviewTruncated(log) {
+          if (log.preview_truncated) return true;
+          const raw = log.response_preview;
+          if (!raw || !String(raw).trim()) return false;
+          const s = String(raw);
+          return s.endsWith('…') && new TextEncoder().encode(s).length >= (this.previewMaxBytes || 500);
+        },
+        openDetails(log) {
+          const raw = this.detailsRaw(log);
+          const name = this.jobName(log.job_id);
+          const status = this.statusLabel(log.status);
+          this.detailsModal = {
+            open: true,
+            title: `${this.t('log_details_modal_title')} — ${name} (${status})`,
+            body: formatDetailsBody(raw),
+            truncated: this.isStoredPreviewTruncated(log),
+          };
+          this._detailsEscHandler = (e) => {
+            if (e.key === 'Escape') this.closeDetails();
+          };
+          window.addEventListener('keydown', this._detailsEscHandler);
+        },
+        closeDetails() {
+          this.detailsModal.open = false;
+          if (this._detailsEscHandler) {
+            window.removeEventListener('keydown', this._detailsEscHandler);
+            this._detailsEscHandler = null;
+          }
+        },
+      },
+    };
+
+    const { createApp } = Vue;
+    createApp({
+      components: { LogTable, FieldHint, CollapsePanel },
+      data() {
+        return {
+          view: 'dashboard',
+          lang: localStorage.getItem('ajs_lang') || 'en',
+          strings: {},
+          payloadPlaceholder: '{{payload}}',
+          cronExamples: [
+            { expr: '*/15 * * * *', descKey: 'cron_ex_every_15min' },
+            { expr: '0 */6 * * *', descKey: 'cron_ex_every_6h' },
+            { expr: '0 9 * * *', descKey: 'cron_ex_daily_930' },
+            { expr: '0 0 * * 1', descKey: 'cron_ex_weekly_mon' },
+            { expr: '0 * * * *', descKey: 'cron_ex_hourly' },
+            { expr: '0 8 * * 1-5', descKey: 'cron_ex_weekdays_8' },
+          ],
+          transformExamples: [
+            {
+              id: 'pass',
+              titleKey: 'transform_ex_pass_title',
+              descKey: 'transform_ex_pass_desc',
+              code: 'return input;',
+            },
+            {
+              id: 'map',
+              titleKey: 'transform_ex_map_title',
+              descKey: 'transform_ex_map_desc',
+              code: 'return input.users.map(u => ({ username: u.name }));',
+            },
+            {
+              id: 'filter',
+              titleKey: 'transform_ex_filter_title',
+              descKey: 'transform_ex_filter_desc',
+              code: 'return input.items.filter(item => item.active === true);',
+            },
+            {
+              id: 'wrap',
+              titleKey: 'transform_ex_wrap_title',
+              descKey: 'transform_ex_wrap_desc',
+              code: 'return {\n  source: "scheduler",\n  importedAt: new Date().toISOString(),\n  data: input\n};',
+            },
+            {
+              id: 'pick',
+              titleKey: 'transform_ex_pick_title',
+              descKey: 'transform_ex_pick_desc',
+              code: 'return {\n  id: input.id,\n  status: input.status,\n  total: input.summary?.count ?? 0\n};',
+            },
+          ],
+          nav: [
+            { id: 'dashboard', label: 'nav_dashboard' },
+            { id: 'jobs', label: 'nav_jobs' },
+            { id: 'logs', label: 'nav_logs' },
+          ],
+          jobs: [],
+          dashboard: {},
+          logs: [],
+          logsJobId: '',
+          editingId: null,
+          form: defaultForm(),
+          oneTimeLocal: '',
+          showCronHelp: false,
+          showTransformExamples: false,
+          error: '',
+          toast: '',
+          previewMaxBytes: 500,
+          jobFilters: {
+            name: '',
+            group: '',
+            createdFrom: '',
+            createdTo: '',
+            sortBy: 'created_at',
+            sortDir: 'desc',
+          },
+          dashCards: [
+            { key: 'active_jobs', label: 'stat_active' },
+            { key: 'paused_jobs', label: 'stat_paused' },
+            { key: 'failed_jobs', label: 'stat_failed' },
+            { key: 'total_executions', label: 'stat_total_runs' },
+            { key: 'succeeded_executions', label: 'stat_succeeded' },
+            { key: 'failed_executions', label: 'stat_failed_runs' },
+          ],
+        };
+      },
+      computed: {
+        jobsById() {
+          return Object.fromEntries(this.jobs.map(j => [j.id, j]));
+        },
+        jobGroupNames() {
+          const names = new Set();
+          for (const j of this.jobs) {
+            const g = (j.job_group || '').trim();
+            if (g) names.add(g);
+          }
+          return [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+        },
+        filteredJobs() {
+          let list = [...this.jobs];
+          const q = this.jobFilters.name.trim().toLowerCase();
+          if (q) {
+            list = list.filter(j => j.name.toLowerCase().includes(q));
+          }
+          const gf = this.jobFilters.group;
+          if (gf === '__none__') {
+            list = list.filter(j => !(j.job_group || '').trim());
+          } else if (gf) {
+            list = list.filter(j => (j.job_group || '').trim() === gf);
+          }
+          if (this.jobFilters.createdFrom) {
+            const from = new Date(this.jobFilters.createdFrom + 'T00:00:00').getTime();
+            list = list.filter(j => new Date(j.created_at).getTime() >= from);
+          }
+          if (this.jobFilters.createdTo) {
+            const to = new Date(this.jobFilters.createdTo + 'T23:59:59.999').getTime();
+            list = list.filter(j => new Date(j.created_at).getTime() <= to);
+          }
+          const dir = this.jobFilters.sortDir === 'asc' ? 1 : -1;
+          const by = this.jobFilters.sortBy;
+          list.sort((a, b) => {
+            if (by === 'name') {
+              return dir * a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+            }
+            const ta = new Date(a.created_at).getTime();
+            const tb = new Date(b.created_at).getTime();
+            return dir * (ta - tb);
+          });
+          return list;
+        },
+        canToggleGroup() {
+          const g = this.jobFilters.group;
+          return Boolean(g && g !== '__none__');
+        },
+        jobsFilterSummary() {
+          const total = this.jobs.length;
+          const shown = this.filteredJobs.length;
+          if (shown === total) {
+            return `${this.t('jobs_filter_count')}: ${total}`;
+          }
+          return `${this.t('jobs_filter_shown')}: ${shown} / ${total}`;
+        },
+        scheduleHint() {
+          const m = { interval: 'schedule_hint_interval', cron: 'schedule_hint_cron', one_time: 'schedule_hint_onetime' };
+          return this.t(m[this.form.schedule_type] || 'schedule_hint_interval');
+        },
+        cronPreview() {
+          if (this.form.schedule_type !== 'cron') {
+            return { valid: true, description: '', nextRuns: [], parts: null, fieldLabels: [] };
+          }
+          return CronFormatter.format(this.form.schedule_value, this.lang);
+        },
+        minOneTimeLocal() {
+          return toLocalDatetimeInput(new Date());
+        },
+        oneTimeUtcPreview() {
+          if (!this.oneTimeLocal) return '';
+          try {
+            const d = new Date(this.oneTimeLocal);
+            if (Number.isNaN(d.getTime())) return '';
+            return this.fmt(d.toISOString());
+          } catch { return ''; }
+        },
+        dashboardSummary() {
+          const parts = [];
+          const running = this.jobs.filter(j => j.state === 'running').length;
+          if (running > 0) {
+            parts.push(`${this.t('stat_running')}: ${running}`);
+          }
+          const total = Number(this.dashboard.total_executions) || 0;
+          if (total > 0) {
+            const ok = Number(this.dashboard.succeeded_executions) || 0;
+            const pct = Math.round((ok / total) * 100);
+            parts.push(`${this.t('dash_success_rate')}: ${pct}% (${ok}/${total})`);
+          }
+          const failedJobs = Number(this.dashboard.failed_jobs) || 0;
+          if (failedJobs > 0) {
+            parts.push(`${this.t('stat_failed')}: ${failedJobs}`);
+          }
+          return parts.length ? parts.join(' · ') : '';
+        },
+      },
+      watch: {
+        view(v) {
+          if (v === 'dashboard') {
+            this.loadDashboard();
+            this.loadJobs();
+          }
+          if (v === 'jobs') this.loadJobs();
+        },
+        'form.schedule_type'(type, prev) {
+          if (type === 'one_time') {
+            if (!this.oneTimeLocal) {
+              this.oneTimeLocal = parseOneTimeToLocal(this.form.schedule_value) || defaultOneTimeLocal();
+            }
+            this.syncOneTimeToSchedule();
+          } else if (prev === 'one_time') {
+            this.oneTimeLocal = '';
+            if (type === 'interval') this.form.schedule_value = '5m';
+            else if (type === 'cron') this.form.schedule_value = '0 */6 * * *';
+          }
+        },
+        oneTimeLocal() {
+          if (this.form.schedule_type === 'one_time') this.syncOneTimeToSchedule();
+        },
+      },
+      async mounted() {
+        await this.loadI18n();
+        await this.loadSettings();
+        await this.loadJobs();
+        await this.loadDashboard();
+      },
+      methods: {
+        t(key) { return this.strings[key] || key; },
+        async loadI18n() {
+          const res = await fetch(`/i18n/${this.lang}.json`);
+          this.strings = await res.json();
+        },
+        async loadSettings() {
+          try {
+            const s = await this.api('/api/settings');
+            if (s?.log_response_preview_max_bytes != null) {
+              this.previewMaxBytes = s.log_response_preview_max_bytes;
+            }
+          } catch { /* keep default */ }
+        },
+        saveLang() {
+          localStorage.setItem('ajs_lang', this.lang);
+          this.loadI18n();
+        },
+        async api(path, opts = {}) {
+          const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            throw new Error(body.error || res.statusText);
+          }
+          if (res.status === 204) return null;
+          return res.json();
+        },
+        dateLocale() {
+          return this.lang === 'ru' ? 'ru-RU' : 'en-US';
+        },
+        fmt(iso) {
+          if (!iso) return '—';
+          try {
+            const d = new Date(iso);
+            if (Number.isNaN(d.getTime())) return String(iso);
+            return new Intl.DateTimeFormat(this.dateLocale(), {
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            }).format(d);
+          } catch {
+            return String(iso);
+          }
+        },
+        fmtDuration(ms) {
+          if (ms == null || ms === '') return '—';
+          const n = Number(ms);
+          if (Number.isNaN(n)) return String(ms);
+          if (n < 1000) return `${n} ${this.t('unit_ms')}`;
+          return `${(n / 1000).toFixed(2)} ${this.t('unit_s')}`;
+        },
+        fmtUtc(date) {
+          return this.fmt(date instanceof Date ? date.toISOString() : date);
+        },
+        cronDescribe(expr) {
+          const r = CronFormatter.format(expr, this.lang);
+          return r.valid ? r.description : (r.error || expr);
+        },
+        normalizeCron() {
+          const r = CronFormatter.format(this.form.schedule_value, this.lang);
+          if (r.normalized) this.form.schedule_value = r.normalized;
+        },
+        applyCronExample(expr) {
+          this.form.schedule_value = expr;
+        },
+        applyTransformExample(code) {
+          this.form.transform_enabled = true;
+          this.form.transform_script = code;
+        },
+        syncOneTimeToSchedule() {
+          if (this.oneTimeLocal) {
+            this.form.schedule_value = localDatetimeToUtcIso(this.oneTimeLocal);
+          }
+        },
+        stateClass(state) {
+          const map = {
+            active: 'text-emerald-400',
+            succeeded: 'text-emerald-400',
+            failed: 'text-red-400',
+            running: 'text-amber-400',
+            paused: 'text-slate-400',
+            disabled: 'text-slate-500',
+            draft: 'text-slate-500',
+          };
+          return map[state] || 'text-slate-300';
+        },
+        lastStatusLabel(status) {
+          const key = 'exec_status_' + status;
+          const label = this.t(key);
+          return label === key ? status : label;
+        },
+        lastStatusClass(status) {
+          if (status === 'succeeded') return 'text-emerald-400';
+          if (status === 'failed') return 'text-red-400';
+          return 'text-slate-400';
+        },
+        defaultForm() { return defaultForm(); },
+        newJob() {
+          this.editingId = null;
+          this.form = defaultForm();
+          this.oneTimeLocal = '';
+          this.showCronHelp = false;
+          this.showTransformExamples = false;
+          this.view = 'form';
+        },
+        jobGroupLabel(group) {
+          const g = (group || '').trim();
+          return g || '—';
+        },
+        resetJobFilters() {
+          this.jobFilters = {
+            name: '',
+            group: '',
+            createdFrom: '',
+            createdTo: '',
+            sortBy: 'created_at',
+            sortDir: 'desc',
+          };
+        },
+        async setGroupEnabled(enabled) {
+          const group = this.jobFilters.group;
+          if (!group || group === '__none__') return;
+          const msg = enabled ? this.t('confirm_enable_group') : this.t('confirm_disable_group');
+          if (!confirm(msg.replace('{{group}}', group))) return;
+          try {
+            const res = await this.api('/api/jobs/group-enabled', {
+              method: 'POST',
+              body: JSON.stringify({ job_group: group, enabled }),
+            });
+            this.toast = (enabled ? this.t('group_enabled_toast') : this.t('group_disabled_toast'))
+              .replace('{{count}}', String(res?.updated ?? 0))
+              .replace('{{group}}', group);
+            await this.loadJobs();
+          } catch (e) { this.error = e.message; }
+        },
+        editJob(job) {
+          this.editingId = job.id;
+          this.form = {
+            name: job.name,
+            description: job.description || '',
+            job_group: job.job_group || '',
+            enabled: job.enabled,
+            schedule_type: job.schedule_type,
+            schedule_value: job.schedule_value,
+            fetch_enabled: job.fetch_enabled,
+            fetch_method: job.fetch_method || 'GET',
+            fetch_url: job.fetch_url || '',
+            fetch_headers: job.fetch_headers || '',
+            fetch_body: job.fetch_body || '',
+            transform_enabled: job.transform_enabled,
+            transform_script: job.transform_script || 'return input;',
+            send_enabled: job.send_enabled,
+            send_method: job.send_method || 'POST',
+            send_url: job.send_url || '',
+            send_headers: job.send_headers || '',
+            send_body_template: job.send_body_template || '{{payload}}',
+            retry_enabled: job.retry_enabled,
+            max_retries: job.max_retries ?? 3,
+            retry_interval_seconds: job.retry_interval_seconds ?? 60,
+          };
+          this.oneTimeLocal = job.schedule_type === 'one_time'
+            ? (parseOneTimeToLocal(job.schedule_value) || defaultOneTimeLocal())
+            : '';
+          if (job.schedule_type === 'one_time') this.syncOneTimeToSchedule();
+          this.showCronHelp = false;
+          this.showTransformExamples = false;
+          this.view = 'form';
+        },
+        async loadJobs() {
+          try { this.jobs = await this.api('/api/jobs'); } catch (e) { this.error = e.message; }
+        },
+        async loadDashboard() {
+          try { this.dashboard = await this.api('/api/dashboard'); } catch (e) { this.error = e.message; }
+        },
+        async loadLogs() {
+          if (!this.logsJobId) return;
+          try { this.logs = await this.api(`/api/jobs/${this.logsJobId}/logs`); } catch (e) { this.error = e.message; }
+        },
+        async saveJob() {
+          this.error = '';
+          const group = (this.form.job_group || '').trim();
+          const body = {
+            ...this.form,
+            description: this.form.description || null,
+            job_group: group || null,
+          };
+          if (body.schedule_type === 'cron') {
+            const r = CronFormatter.format(body.schedule_value, this.lang);
+            if (!r.valid) {
+              this.error = r.error;
+              return;
+            }
+            body.schedule_value = r.normalized;
+          } else if (body.schedule_type === 'one_time') {
+            if (!this.oneTimeLocal) {
+              this.error = this.t('error_one_time_required');
+              return;
+            }
+            const at = new Date(this.oneTimeLocal);
+            if (Number.isNaN(at.getTime()) || at.getTime() <= Date.now()) {
+              this.error = this.t('error_one_time_future');
+              return;
+            }
+            body.schedule_value = localDatetimeToUtcIso(this.oneTimeLocal);
+          }
+          try {
+            if (this.editingId) await this.api(`/api/jobs/${this.editingId}`, { method: 'PUT', body: JSON.stringify(body) });
+            else await this.api('/api/jobs', { method: 'POST', body: JSON.stringify(body) });
+            this.toast = this.t('saved');
+            await this.loadJobs();
+            this.view = 'jobs';
+          } catch (e) { this.error = e.message; }
+        },
+        async removeJob(id) {
+          if (!confirm(this.t('confirm_delete'))) return;
+          try {
+            await this.api(`/api/jobs/${id}`, { method: 'DELETE' });
+            this.toast = this.t('deleted');
+            await this.loadJobs();
+          } catch (e) { this.error = e.message; }
+        },
+        async runJob(id) {
+          try {
+            await this.api(`/api/jobs/${id}/run`, { method: 'POST' });
+            this.toast = this.t('run_started');
+            await this.loadJobs();
+            if (this.view === 'dashboard') await this.loadDashboard();
+          } catch (e) { this.error = e.message; }
+        },
+      },
+    }).mount('#app');
+
+    function defaultForm() {
+      return {
+        name: '',
+        description: '',
+        job_group: '',
+        enabled: false,
+        schedule_type: 'interval',
+        schedule_value: '5m',
+        fetch_enabled: true,
+        fetch_method: 'GET',
+        fetch_url: '',
+        fetch_headers: '{}',
+        fetch_body: '',
+        transform_enabled: false,
+        transform_script: 'return input;',
+        send_enabled: false,
+        send_method: 'POST',
+        send_url: '',
+        send_headers: '{}',
+        send_body_template: '{{payload}}',
+        retry_enabled: true,
+        max_retries: 3,
+        retry_interval_seconds: 60,
+      };
+    }
+
+    function pad2(n) {
+      return String(n).padStart(2, '0');
+    }
+
+    function toLocalDatetimeInput(date) {
+      return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+    }
+
+    function defaultOneTimeLocal() {
+      const d = new Date();
+      d.setSeconds(0, 0);
+      d.setMinutes(d.getMinutes() + 30);
+      return toLocalDatetimeInput(d);
+    }
+
+    function parseOneTimeToLocal(value) {
+      if (!value || typeof value !== 'string') return '';
+      let d;
+      if (value.includes('T')) {
+        d = new Date(value);
+      } else {
+        d = new Date(value.trim().replace(' ', 'T') + 'Z');
+      }
+      if (Number.isNaN(d.getTime())) return '';
+      return toLocalDatetimeInput(d);
+    }
+
+    function localDatetimeToUtcIso(localStr) {
+      return new Date(localStr).toISOString();
+    }
+  </script>
+</body>
+
+</html>

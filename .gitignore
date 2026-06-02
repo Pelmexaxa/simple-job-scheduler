@@ -1,0 +1,24 @@
+# Rust / Cargo
+/target/
+
+# Локальная конфигурация и секреты
+.env
+.env.local
+.env.*.local
+
+# Данные и журналы рантайма
+*.db
+*.db-*
+/logs/
+scheduler.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / редактор
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

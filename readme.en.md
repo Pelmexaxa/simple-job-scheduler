@@ -32,6 +32,12 @@ The server listens on `AJS_HOST:AJS_PORT`. `.env.example` defaults to `127.0.0.1
 
 Open in browser: [http://127.0.0.1:3000](http://127.0.0.1:3000) (or your port from `.env`).
 
+## Build portable version
+
+```bash
+cargo build --release
+```
+
 ### Stopping the server
 
 **Ctrl+C** triggers a graceful shutdown:
@@ -46,22 +52,22 @@ Log lines confirm the signal and clean exit.
 
 Prefix **`AJS_`** (see `.env.example`):
 
-| Variable | Purpose | Default |
-| -------- | ------- | ------- |
-| `AJS_HOST` | HTTP bind address | `127.0.0.1` |
-| `AJS_PORT` | HTTP port | `6378` |
-| `AJS_DB_PATH` | SQLite file path | `./scheduler.db` |
-| `AJS_LOG_LEVEL` | Log level (`tracing`) | `info` |
-| `AJS_DEFAULT_LANGUAGE` | Default server/UI language: `ru` or `en` | `en` |
-| `AJS_MAX_CONCURRENT_JOBS` | Max parallel job executions | `10` |
-| `AJS_HTTP_TIMEOUT_SECONDS` | HTTP fetch/send timeout (seconds) | `60` |
-| `AJS_JOB_TICK_INTERVAL_MS` | Scheduler tick interval (ms) | `1000` |
-| `AJS_ENABLE_JS_TRANSFORM` | Enable JS transform (`true`/`false`) | `true` |
-| `AJS_RETENTION_DAYS` | Execution log retention (days) | `30` |
-| `AJS_LOG_RESPONSE_PREVIEW_MAX_BYTES` | Max `response_preview` size in SQLite execution logs (UTF-8 bytes) | `500` |
-| `AJS_LOG_DIR` | File log directory (relative to cwd or absolute) | `./logs` |
-| `AJS_RUN_OVERDUE_ON_STARTUP` | Run overdue jobs right after startup (`true`) or reschedule `next_run_at` from now without running (`false`) | `true` |
-| `AJS_DISABLE_ALL_JOBS_ON_STARTUP` | Disable all jobs in the DB on startup (`enabled = 0`); enable manually in the UI | `false` |
+| Variable                             | Purpose                                                                                                      | Default          |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------ | ---------------- |
+| `AJS_HOST`                           | HTTP bind address                                                                                            | `127.0.0.1`      |
+| `AJS_PORT`                           | HTTP port                                                                                                    | `6378`           |
+| `AJS_DB_PATH`                        | SQLite file path                                                                                             | `./scheduler.db` |
+| `AJS_LOG_LEVEL`                      | Log level (`tracing`)                                                                                        | `info`           |
+| `AJS_DEFAULT_LANGUAGE`               | Default server/UI language: `ru` or `en`                                                                     | `en`             |
+| `AJS_MAX_CONCURRENT_JOBS`            | Max parallel job executions                                                                                  | `10`             |
+| `AJS_HTTP_TIMEOUT_SECONDS`           | HTTP fetch/send timeout (seconds)                                                                            | `60`             |
+| `AJS_JOB_TICK_INTERVAL_MS`           | Scheduler tick interval (ms)                                                                                 | `1000`           |
+| `AJS_ENABLE_JS_TRANSFORM`            | Enable JS transform (`true`/`false`)                                                                         | `true`           |
+| `AJS_RETENTION_DAYS`                 | Execution log retention (days)                                                                               | `30`             |
+| `AJS_LOG_RESPONSE_PREVIEW_MAX_BYTES` | Max `response_preview` size in SQLite execution logs (UTF-8 bytes)                                           | `500`            |
+| `AJS_LOG_DIR`                        | File log directory (relative to cwd or absolute)                                                             | `./logs`         |
+| `AJS_RUN_OVERDUE_ON_STARTUP`         | Run overdue jobs right after startup (`true`) or reschedule `next_run_at` from now without running (`false`) | `true`           |
+| `AJS_DISABLE_ALL_JOBS_ON_STARTUP`    | Disable all jobs in the DB on startup (`enabled = 0`); enable manually in the UI                             | `false`          |
 
 ### Startup behavior
 
@@ -90,17 +96,17 @@ Typical manual-control setup: `AJS_DISABLE_ALL_JOBS_ON_STARTUP=true`, optionally
 
 Base prefix: `/api`. Request bodies are JSON.
 
-| Method | Path | Description |
-| ------ | ---- | ----------- |
-| `GET` | `/api/dashboard` | Stats and recent runs |
-| `GET` | `/api/settings` | Public UI settings (execution log preview limit) |
-| `GET` | `/api/jobs` | List jobs |
-| `POST` | `/api/jobs` | Create job |
-| `PUT` | `/api/jobs/{id}` | Update job |
-| `DELETE` | `/api/jobs/{id}` | Delete job |
-| `POST` | `/api/jobs/{id}/run` | Run now (background) |
-| `POST` | `/api/jobs/group-enabled` | Enable/disable all jobs in a group (`{ "job_group", "enabled" }`) |
-| `GET` | `/api/jobs/{id}/logs` | Execution history (up to 100 rows) |
+| Method   | Path                      | Description                                                       |
+| -------- | ------------------------- | ----------------------------------------------------------------- |
+| `GET`    | `/api/dashboard`          | Stats and recent runs                                             |
+| `GET`    | `/api/settings`           | Public UI settings (execution log preview limit)                  |
+| `GET`    | `/api/jobs`               | List jobs                                                         |
+| `POST`   | `/api/jobs`               | Create job                                                        |
+| `PUT`    | `/api/jobs/{id}`          | Update job                                                        |
+| `DELETE` | `/api/jobs/{id}`          | Delete job                                                        |
+| `POST`   | `/api/jobs/{id}/run`      | Run now (background)                                              |
+| `POST`   | `/api/jobs/group-enabled` | Enable/disable all jobs in a group (`{ "job_group", "enabled" }`) |
+| `GET`    | `/api/jobs/{id}/logs`     | Execution history (up to 100 rows)                                |
 
 Static: `/` — web UI, `/i18n/{lang}.json` — UI strings.
 
@@ -108,12 +114,12 @@ Static: `/` — web UI, `/i18n/{lang}.json` — UI strings.
 
 The frontend is a single-page app with **no build step**: Axum serves the `web/` directory as static files.
 
-| File | Purpose |
-| ---- | ------- |
-| `index.html` | Markup and Vue application |
-| `vue.global.prod.js` | Vue 3 (production build) |
-| `tailwindcss.js` | Tailwind CSS (runtime) |
-| `cron-formatter.js` | Cron parsing and next-run preview |
+| File                 | Purpose                           |
+| -------------------- | --------------------------------- |
+| `index.html`         | Markup and Vue application        |
+| `vue.global.prod.js` | Vue 3 (production build)          |
+| `tailwindcss.js`     | Tailwind CSS (runtime)            |
+| `cron-formatter.js`  | Cron parsing and next-run preview |
 
 Scripts are loaded locally from the site root (`/vue.global.prod.js`, etc.). The UI works with **only the server running** — the browser does not need internet access. Language switch: `ru` / `en` via JSON in `i18n/`.
 

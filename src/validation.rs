@@ -1,7 +1,7 @@
 //! Валидация тела запроса на создание/обновление задачи.
 
 use crate::i18n::{LogLang, ValMsg};
-use crate::models::{JobInput, ScheduleType, JOB_GROUP_MAX_LEN, normalize_job_group};
+use crate::models::{JOB_GROUP_MAX_LEN, JobInput, ScheduleType, normalize_job_group};
 use crate::scheduler::parse_interval;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
@@ -56,12 +56,10 @@ fn validate_schedule(input: &JobInput, lang: LogLang) -> Result<(), String> {
     }
 
     match input.schedule_type {
-        ScheduleType::Interval => {
-            match parse_interval(value) {
-                Some(d) if d.num_seconds() > 0 => Ok(()),
-                _ => Err(ValMsg::ScheduleIntervalInvalid.text(lang).to_string()),
-            }
-        }
+        ScheduleType::Interval => match parse_interval(value) {
+            Some(d) if d.num_seconds() > 0 => Ok(()),
+            _ => Err(ValMsg::ScheduleIntervalInvalid.text(lang).to_string()),
+        },
         ScheduleType::Cron => {
             if Schedule::from_str(value).is_ok() {
                 Ok(())
@@ -78,19 +76,27 @@ fn validate_schedule(input: &JobInput, lang: LogLang) -> Result<(), String> {
 }
 
 fn validate_fetch(input: &JobInput, lang: LogLang) -> Result<(), String> {
-    let url = non_empty(input.fetch_url.as_ref()).ok_or_else(|| {
-        ValMsg::FetchUrlRequired.text(lang).to_string()
-    })?;
+    let url = non_empty(input.fetch_url.as_ref())
+        .ok_or_else(|| ValMsg::FetchUrlRequired.text(lang).to_string())?;
     if !is_http_url(url) {
         return Err(ValMsg::FetchUrlInvalid.text(lang).to_string());
     }
 
-    let method = input.fetch_method.as_deref().unwrap_or("GET").trim().to_uppercase();
+    let method = input
+        .fetch_method
+        .as_deref()
+        .unwrap_or("GET")
+        .trim()
+        .to_uppercase();
     if method != "GET" && method != "POST" {
         return Err(ValMsg::FetchMethodInvalid.text(lang).to_string());
     }
 
-    validate_json_object(input.fetch_headers.as_ref(), ValMsg::FetchHeadersInvalid, lang)
+    validate_json_object(
+        input.fetch_headers.as_ref(),
+        ValMsg::FetchHeadersInvalid,
+        lang,
+    )
 }
 
 fn validate_transform(input: &JobInput, lang: LogLang) -> Result<(), String> {
@@ -101,19 +107,27 @@ fn validate_transform(input: &JobInput, lang: LogLang) -> Result<(), String> {
 }
 
 fn validate_send(input: &JobInput, lang: LogLang) -> Result<(), String> {
-    let url = non_empty(input.send_url.as_ref()).ok_or_else(|| {
-        ValMsg::SendUrlRequired.text(lang).to_string()
-    })?;
+    let url = non_empty(input.send_url.as_ref())
+        .ok_or_else(|| ValMsg::SendUrlRequired.text(lang).to_string())?;
     if !is_http_url(url) {
         return Err(ValMsg::SendUrlInvalid.text(lang).to_string());
     }
 
-    let method = input.send_method.as_deref().unwrap_or("POST").trim().to_uppercase();
+    let method = input
+        .send_method
+        .as_deref()
+        .unwrap_or("POST")
+        .trim()
+        .to_uppercase();
     if method != "POST" && method != "PUT" {
         return Err(ValMsg::SendMethodInvalid.text(lang).to_string());
     }
 
-    validate_json_object(input.send_headers.as_ref(), ValMsg::SendHeadersInvalid, lang)
+    validate_json_object(
+        input.send_headers.as_ref(),
+        ValMsg::SendHeadersInvalid,
+        lang,
+    )
 }
 
 fn validate_retry(input: &JobInput, lang: LogLang) -> Result<(), String> {
@@ -128,11 +142,7 @@ fn validate_retry(input: &JobInput, lang: LogLang) -> Result<(), String> {
     }
 }
 
-fn validate_json_object(
-    raw: Option<&String>,
-    msg: ValMsg,
-    lang: LogLang,
-) -> Result<(), String> {
+fn validate_json_object(raw: Option<&String>, msg: ValMsg, lang: LogLang) -> Result<(), String> {
     let Some(raw) = raw else {
         return Ok(());
     };
@@ -141,8 +151,7 @@ fn validate_json_object(
         return Ok(());
     }
 
-    let value: Value = serde_json::from_str(trimmed)
-        .map_err(|_| msg.text(lang).to_string())?;
+    let value: Value = serde_json::from_str(trimmed).map_err(|_| msg.text(lang).to_string())?;
     if value.is_object() {
         Ok(())
     } else {
@@ -153,11 +162,7 @@ fn validate_json_object(
 fn non_empty(value: Option<&String>) -> Option<&str> {
     value.and_then(|s| {
         let t = s.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(t)
-        }
+        if t.is_empty() { None } else { Some(t) }
     })
 }
 
@@ -186,6 +191,7 @@ mod tests {
     fn base_input() -> JobInput {
         JobInput {
             name: "Test".to_string(),
+            job_group: None,
             description: None,
             enabled: true,
             schedule_type: ScheduleType::Interval,

@@ -1,2 +1,2 @@
 # Ignore frontend
-- (^|/)web/
+web/* linguist-vendored=true

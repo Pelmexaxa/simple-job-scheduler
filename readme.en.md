@@ -14,7 +14,7 @@ HTTP task scheduler in Rust: interval / cron / one-time schedules, fetch → JS 
 - SQLite for jobs and execution history; automatic purge of old log rows.
 - Server logs to stdout and rotating log files.
 - UI and server message localization (`ru` / `en`).
-- Web UI on Vue 3 and Tailwind: all assets live in `web/`; no external CDN required.
+- Web UI on Vue 3 and Tailwind: all assets live in `web/`; no external Node.js required.
 - Server-side job field validation (only enabled sections are checked).
 
 ## Requirements

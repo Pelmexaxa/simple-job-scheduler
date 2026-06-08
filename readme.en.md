@@ -2,7 +2,7 @@
 
 **Русский:** [README.md](README.md)
 
-HTTP task scheduler in Rust: interval / cron / one-time schedules, fetch → JS transform → send pipeline, SQLite storage, and a Vue + Tailwind web UI (local static assets, no build step, no CDN).
+HTTP task scheduler in Rust: interval / cron / one-time schedules, fetch → JS transform → send pipeline, SQLite storage, and a Vue + Tailwind web UI (local static assets, no build step, no Node.js).
 
 ## Features
 

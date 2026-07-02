@@ -150,6 +150,7 @@
               <td class="py-2 pr-4"><span v-if="job.last_status" :class="lastStatusClass(job.last_status)">{{ lastStatusLabel(job.last_status) }}</span><span v-else class="text-slate-500">{{ t('job_never_run') }}</span></td>
               <td class="py-2 flex flex-wrap gap-2">
                 <button @click="editJob(job)" class="text-cyan-400 hover:underline">{{ t('btn_edit') }}</button>
+                <button @click="copyJob(job)" class="text-sky-400 hover:underline">{{ t('btn_copy') }}</button>
                 <button @click="runJob(job.id)" class="text-emerald-400 hover:underline">{{ t('btn_run') }}</button>
                 <button @click="removeJob(job.id)" class="text-red-400 hover:underline">{{ t('btn_delete') }}</button>
               </td>
@@ -275,14 +276,14 @@
           <legend class="text-sm text-cyan-400 px-1">{{ t('section_fetch') }}</legend>
           <field-hint :text="t('help_fetch_section')"></field-hint>
           <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="form.fetch_enabled" /> {{ t('field_fetch_enabled') }}</label>
-          <div class="grid grid-cols-2 gap-2">
-            <label class="block text-sm"><span class="text-slate-400">{{ t('field_fetch_method') }}</span>
+          <div class="grid grid-cols-4 gap-2">
+            <label class="block text-sm col-span-1"><span class="text-slate-400">{{ t('field_fetch_method') }}</span>
               <select v-model="form.fetch_method"
                 class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm">
                 <option>GET</option>
                 <option>POST</option>
               </select></label>
-            <label class="block text-sm"><span class="text-slate-400">{{ t('field_fetch_url') }}</span>
+            <label class="block text-sm col-span-3"><span class="text-slate-400">{{ t('field_fetch_url') }}</span>
               <input v-model="form.fetch_url"
                 class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" /></label>
           </div>
@@ -732,6 +733,10 @@
             this.loadJobs();
           }
           if (v === 'jobs') this.loadJobs();
+          if (v === 'logs') {
+            this.loadJobs();
+            this.loadLogs();
+          }
         },
         'form.schedule_type'(type, prev) {
           if (type === 'one_time') {
@@ -878,6 +883,8 @@
           };
         },
         async setGroupEnabled(enabled) {
+          this.error = '';
+          this.toast = '';
           const group = this.jobFilters.group;
           if (!group || group === '__none__') return;
           const msg = enabled ? this.t('confirm_enable_group') : this.t('confirm_disable_group');
@@ -890,12 +897,11 @@
             this.toast = (enabled ? this.t('group_enabled_toast') : this.t('group_disabled_toast'))
               .replace('{{count}}', String(res?.updated ?? 0))
               .replace('{{group}}', group);
-            await this.loadJobs();
+            await this.refreshData();
           } catch (e) { this.error = e.message; }
         },
-        editJob(job) {
-          this.editingId = job.id;
-          this.form = {
+        formFromJob(job) {
+          return {
             name: job.name,
             description: job.description || '',
             job_group: job.job_group || '',
@@ -918,6 +924,10 @@
             max_retries: job.max_retries ?? 3,
             retry_interval_seconds: job.retry_interval_seconds ?? 60,
           };
+        },
+        openJobForm(job, editingId) {
+          this.editingId = editingId;
+          this.form = this.formFromJob(job);
           this.oneTimeLocal = job.schedule_type === 'one_time'
             ? (parseOneTimeToLocal(job.schedule_value) || defaultOneTimeLocal())
             : '';
@@ -925,6 +935,21 @@
           this.showCronHelp = false;
           this.showTransformExamples = false;
           this.view = 'form';
+        },
+        editJob(job) {
+          this.openJobForm(job, job.id);
+        },
+        copyJob(job) {
+          this.openJobForm(job, null);
+          this.error = '';
+          this.toast = this.t('copied_to_form');
+        },
+        async refreshData() {
+          await Promise.all([
+            this.loadJobs(),
+            this.loadDashboard(),
+            this.logsJobId ? this.loadLogs() : Promise.resolve(),
+          ]);
         },
         async loadJobs() {
           try { this.jobs = await this.api('/api/jobs'); } catch (e) { this.error = e.message; }
@@ -938,6 +963,7 @@
         },
         async saveJob() {
           this.error = '';
+          this.toast = '';
           const group = (this.form.job_group || '').trim();
           const body = {
             ...this.form,
@@ -967,24 +993,32 @@
             if (this.editingId) await this.api(`/api/jobs/${this.editingId}`, { method: 'PUT', body: JSON.stringify(body) });
             else await this.api('/api/jobs', { method: 'POST', body: JSON.stringify(body) });
             this.toast = this.t('saved');
-            await this.loadJobs();
+            await this.refreshData();
             this.view = 'jobs';
           } catch (e) { this.error = e.message; }
         },
         async removeJob(id) {
           if (!confirm(this.t('confirm_delete'))) return;
+          this.error = '';
+          this.toast = '';
           try {
             await this.api(`/api/jobs/${id}`, { method: 'DELETE' });
             this.toast = this.t('deleted');
-            await this.loadJobs();
+            if (this.logsJobId === id) {
+              this.logsJobId = '';
+              this.logs = [];
+            }
+            await this.refreshData();
           } catch (e) { this.error = e.message; }
         },
         async runJob(id) {
+          this.error = '';
+          this.toast = '';
           try {
             await this.api(`/api/jobs/${id}/run`, { method: 'POST' });
             this.toast = this.t('run_started');
-            await this.loadJobs();
-            if (this.view === 'dashboard') await this.loadDashboard();
+            await this.refreshData();
+            setTimeout(() => { this.refreshData(); }, 1000);
           } catch (e) { this.error = e.message; }
         },
       },

@@ -518,8 +518,17 @@ pub fn parse_interval(value: &str) -> Option<Duration> {
 
 /// Следующий запуск по cron-выражению.
 fn next_cron(expression: &str, _from: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let schedule = Schedule::from_str(expression).ok()?;
+    let schedule = parse_cron_schedule(expression)?;
     schedule.upcoming(Utc).next()
+}
+
+/// Разбирает Unix cron из 5 полей; крейт `cron` хранит секунды отдельным первым полем.
+pub fn parse_cron_schedule(expression: &str) -> Option<Schedule> {
+    let value = expression.trim();
+    if value.split_whitespace().count() != 5 {
+        return None;
+    }
+    Schedule::from_str(&format!("0 {value}")).ok()
 }
 
 /// Однократный запуск: RFC3339 или `YYYY-MM-DD HH:MM:SS` (UTC); прошедшие даты игнорируются.

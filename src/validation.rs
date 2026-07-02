@@ -2,11 +2,9 @@
 
 use crate::i18n::{LogLang, ValMsg};
 use crate::models::{JOB_GROUP_MAX_LEN, JobInput, ScheduleType, normalize_job_group};
-use crate::scheduler::parse_interval;
+use crate::scheduler::{parse_cron_schedule, parse_interval};
 use chrono::{DateTime, Utc};
-use cron::Schedule;
 use serde_json::Value;
-use std::str::FromStr;
 
 /// Проверяет поля задачи; секции с выключенной галочкой не проверяются.
 pub fn validate_job(input: &JobInput, lang: LogLang) -> Result<(), String> {
@@ -61,7 +59,7 @@ fn validate_schedule(input: &JobInput, lang: LogLang) -> Result<(), String> {
             _ => Err(ValMsg::ScheduleIntervalInvalid.text(lang).to_string()),
         },
         ScheduleType::Cron => {
-            if Schedule::from_str(value).is_ok() {
+            if parse_cron_schedule(value).is_some() {
                 Ok(())
             } else {
                 Err(ValMsg::ScheduleCronInvalid.text(lang).to_string())
@@ -233,6 +231,14 @@ mod tests {
     fn skips_fetch_when_disabled() {
         let mut input = base_input();
         input.fetch_url = None;
+        assert!(validate_job(&input, LogLang::En).is_ok());
+    }
+
+    #[test]
+    fn accepts_five_field_cron_with_range_step() {
+        let mut input = base_input();
+        input.schedule_type = ScheduleType::Cron;
+        input.schedule_value = "50 1-23/2 * * *".to_string();
         assert!(validate_job(&input, LogLang::En).is_ok());
     }
 }

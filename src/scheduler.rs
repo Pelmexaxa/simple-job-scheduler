@@ -241,7 +241,6 @@ impl SchedulerHandle {
             http_timeout_secs: self.config.http_timeout_seconds,
             enable_js: self.config.enable_js_transform,
             log_lang: lang,
-            preview_max_bytes: self.config.log_response_preview_max_bytes,
             cancel: self.cancel_rx.clone(),
         };
 

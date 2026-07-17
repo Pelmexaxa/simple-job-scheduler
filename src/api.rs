@@ -50,9 +50,10 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 /// GET `/api/settings` — публичные параметры для веб-интерфейса.
 async fn settings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let max = u32::try_from(state.config.log_response_preview_max_bytes).unwrap_or(u32::MAX);
+    let _ = state;
     Json(PublicSettings {
-        log_response_preview_max_bytes: max,
+        max_step_output_bytes: u32::try_from(crate::execution::MAX_STEP_OUTPUT_BYTES)
+            .unwrap_or(u32::MAX),
     })
     .into_response()
 }

@@ -48,12 +48,13 @@ pub enum LogMsg {
     JobExecutionFailed,
     JobRetryAttempt,
     PipelineStepFailed,
-    StepFetch,
-    StepFetchDone,
+    StepHttp,
+    StepHttpDone,
     StepTransform,
     StepTransformDone,
-    StepSend,
-    StepSendDone,
+    StepTransformSkipped,
+    StepCommand,
+    StepCommandDone,
     HttpOutbound,
     ApiRequest,
     ApiResponse,
@@ -231,11 +232,11 @@ impl LogMsg {
             (Ru, PipelineStepFailed) => "Ошибка шага пайплайна задачи",
             (En, PipelineStepFailed) => "Job pipeline step failed",
 
-            (Ru, StepFetch) => "Шаг fetch: исходящий HTTP-запрос",
-            (En, StepFetch) => "Fetch step: outbound HTTP request",
+            (Ru, StepHttp) => "Шаг http: исходящий HTTP-запрос",
+            (En, StepHttp) => "HTTP step: outbound request",
 
-            (Ru, StepFetchDone) => "Шаг fetch завершён",
-            (En, StepFetchDone) => "Fetch step completed",
+            (Ru, StepHttpDone) => "Шаг http завершён",
+            (En, StepHttpDone) => "HTTP step completed",
 
             (Ru, StepTransform) => "Шаг transform: JS-преобразование",
             (En, StepTransform) => "Transform step: JS transformation",
@@ -243,11 +244,14 @@ impl LogMsg {
             (Ru, StepTransformDone) => "Шаг transform завершён",
             (En, StepTransformDone) => "Transform step completed",
 
-            (Ru, StepSend) => "Шаг send: исходящий HTTP-запрос",
-            (En, StepSend) => "Send step: outbound HTTP request",
+            (Ru, StepTransformSkipped) => "Шаг transform пропущен (JS отключён)",
+            (En, StepTransformSkipped) => "Transform step skipped (JS disabled)",
 
-            (Ru, StepSendDone) => "Шаг send завершён",
-            (En, StepSendDone) => "Send step completed",
+            (Ru, StepCommand) => "Шаг command: локальная команда",
+            (En, StepCommand) => "Command step: local process",
+
+            (Ru, StepCommandDone) => "Шаг command завершён",
+            (En, StepCommandDone) => "Command step completed",
 
             (Ru, HttpOutbound) => "Исходящий HTTP-запрос",
             (En, HttpOutbound) => "Outbound HTTP request",
@@ -296,6 +300,12 @@ pub enum ValMsg {
     SendUrlInvalid,
     SendMethodInvalid,
     SendHeadersInvalid,
+    HttpUrlRequired,
+    HttpUrlInvalid,
+    HttpMethodInvalid,
+    HttpHeadersInvalid,
+    CommandProgramRequired,
+    CommandArgInvalid,
     MaxRetriesInvalid,
     RetryIntervalInvalid,
 }
@@ -366,6 +376,24 @@ impl ValMsg {
 
             (Ru, SendHeadersInvalid) => "Заголовки отправки должны быть JSON-объектом",
             (En, SendHeadersInvalid) => "Send headers must be a JSON object",
+
+            (Ru, HttpUrlRequired) => "Укажите URL для HTTP-шага",
+            (En, HttpUrlRequired) => "HTTP step URL is required",
+
+            (Ru, HttpUrlInvalid) => "URL HTTP-шага должен начинаться с http:// или https://",
+            (En, HttpUrlInvalid) => "HTTP step URL must start with http:// or https://",
+
+            (Ru, HttpMethodInvalid) => "Метод HTTP-шага: GET, POST, PUT или DELETE",
+            (En, HttpMethodInvalid) => "HTTP step method must be GET, POST, PUT, or DELETE",
+
+            (Ru, HttpHeadersInvalid) => "Заголовки HTTP-шага должны быть JSON-объектом",
+            (En, HttpHeadersInvalid) => "HTTP step headers must be a JSON object",
+
+            (Ru, CommandProgramRequired) => "Укажите программу для шага command",
+            (En, CommandProgramRequired) => "Command step program is required",
+
+            (Ru, CommandArgInvalid) => "Аргументы команды не должны содержать NUL",
+            (En, CommandArgInvalid) => "Command arguments must not contain NUL bytes",
 
             (Ru, MaxRetriesInvalid) => "Макс. повторов: целое число ≥ 0",
             (En, MaxRetriesInvalid) => "Max retries must be an integer ≥ 0",

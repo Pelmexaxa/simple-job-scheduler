@@ -27,8 +27,6 @@ pub struct AppConfig {
     pub retention_days: u32,
     /// Каталог файлов серверных логов; по умолчанию `./logs` относительно каталога запуска.
     pub log_dir: String,
-    /// Максимальный размер поля `response_preview` в журнале выполнения (байты UTF-8).
-    pub log_response_preview_max_bytes: usize,
     /// При старте выполнять задачи с просроченным `next_run_at` (иначе — пересчитать расписание от «сейчас»).
     pub run_overdue_on_startup: bool,
     /// При старте отключить все задачи (`enabled = 0`); включение — вручную в UI.
@@ -50,7 +48,6 @@ impl AppConfig {
             enable_js_transform: env_bool("AJS_ENABLE_JS_TRANSFORM", true),
             retention_days: env_parse("AJS_RETENTION_DAYS", 30),
             log_dir: env_string("AJS_LOG_DIR", "./logs"),
-            log_response_preview_max_bytes: env_parse("AJS_LOG_RESPONSE_PREVIEW_MAX_BYTES", 500),
             run_overdue_on_startup: env_bool("AJS_RUN_OVERDUE_ON_STARTUP", true),
             disable_all_jobs_on_startup: env_bool("AJS_DISABLE_ALL_JOBS_ON_STARTUP", false),
         }

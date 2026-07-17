@@ -1,29 +1,32 @@
-//! Выполнение пайплайна задачи: HTTP fetch → JS-преобразование → HTTP send, с повторами.
+//! Выполнение пайплайна задачи: упорядоченные шаги http / transform / command.
 
 use crate::database::DbPool;
 use crate::i18n::{LogLang, LogMsg};
 use crate::jobs;
-use crate::models::{now_rfc3339, ExecutionLogRow, JobRow};
+use crate::models::{now_rfc3339, ExecutionLogRow, JobRow, JobStep, StepKind, StepLogEntry};
 use crate::scheduler::schedule_after_success;
 use boa_engine::{Context, JsValue, Source};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde_json::Value;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-/// Максимальный размер тела HTTP-ответа (10 МБ).
-const MAX_RESPONSE_BODY_BYTES: usize = 10 * 1024 * 1024;
+/// Максимальный размер тела HTTP-ответа / вывода команды (10 МБ).
+pub const MAX_STEP_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Ошибка одной попытки пайплайна с частичными метриками для журнала.
 struct AttemptFailure {
     message: String,
     fetch_status: Option<i32>,
     send_status: Option<i32>,
-    preview: Option<String>,
-    preview_truncated: bool,
+    output: Option<String>,
+    steps_log: Vec<StepLogEntry>,
 }
 
 /// Контекст одного выполнения: пул БД, таймауты, флаг JS и язык логов.
@@ -32,7 +35,6 @@ pub struct ExecutionContext {
     pub http_timeout_secs: u64,
     pub enable_js: bool,
     pub log_lang: LogLang,
-    pub preview_max_bytes: usize,
     pub cancel: watch::Receiver<bool>,
 }
 
@@ -80,8 +82,8 @@ pub async fn run_job(ctx: &ExecutionContext, job: &JobRow) -> Result<(), String>
     let mut last_error: Option<String> = None;
     let mut fetch_status: Option<i32> = None;
     let mut send_status: Option<i32> = None;
-    let mut preview: Option<String> = None;
-    let mut preview_truncated = false;
+    let mut output: Option<String> = None;
+    let mut steps_log: Vec<StepLogEntry> = Vec::new();
     let mut success = false;
 
     loop {
@@ -98,8 +100,8 @@ pub async fn run_job(ctx: &ExecutionContext, job: &JobRow) -> Result<(), String>
             Ok(result) => {
                 fetch_status = result.fetch_status;
                 send_status = result.send_status;
-                preview = result.preview;
-                preview_truncated = result.preview_truncated;
+                output = result.output;
+                steps_log = result.steps_log;
                 success = true;
                 break;
             }
@@ -111,11 +113,11 @@ pub async fn run_job(ctx: &ExecutionContext, job: &JobRow) -> Result<(), String>
                 if failure.send_status.is_some() {
                     send_status = failure.send_status;
                 }
-                if failure.preview.is_some() {
-                    preview = failure.preview;
+                if failure.output.is_some() {
+                    output = failure.output;
                 }
-                if failure.preview_truncated {
-                    preview_truncated = true;
+                if !failure.steps_log.is_empty() {
+                    steps_log = failure.steps_log;
                 }
                 error!(
                     job_id = %job.id,
@@ -156,6 +158,7 @@ pub async fn run_job(ctx: &ExecutionContext, job: &JobRow) -> Result<(), String>
     let finished_at = now_rfc3339();
     let duration_ms = started.elapsed().as_millis() as i64;
     let status = if success { "succeeded" } else { "failed" };
+    let steps_log_json = serde_json::to_string(&steps_log).ok();
 
     let log = ExecutionLogRow {
         id: log_id,
@@ -167,8 +170,9 @@ pub async fn run_job(ctx: &ExecutionContext, job: &JobRow) -> Result<(), String>
         send_status: send_status.map(i64::from),
         duration_ms: Some(duration_ms),
         error_message: last_error.clone(),
-        response_preview: preview,
-        preview_truncated: if preview_truncated { 1 } else { 0 },
+        response_preview: output,
+        preview_truncated: 0,
+        steps_log: steps_log_json,
     };
 
     jobs::insert_log(&ctx.pool, &log)
@@ -204,12 +208,12 @@ pub async fn run_job(ctx: &ExecutionContext, job: &JobRow) -> Result<(), String>
     }
 }
 
-/// Результат одной попытки выполнения шагов fetch/send.
+/// Результат одной попытки выполнения шагов.
 struct StepResult {
     fetch_status: Option<i32>,
     send_status: Option<i32>,
-    preview: Option<String>,
-    preview_truncated: bool,
+    output: Option<String>,
+    steps_log: Vec<StepLogEntry>,
 }
 
 /// Один проход пайплайна без учёта повторов.
@@ -219,204 +223,581 @@ async fn execute_once(
     client: &Client,
 ) -> Result<StepResult, AttemptFailure> {
     let lang = ctx.log_lang;
-    let mut payload: Option<String> = None;
-    let mut fetch_status = None;
-    let mut send_status = None;
-    let mut data;
+    let steps = job.parsed_steps();
+    let mut payload = "{}".to_string();
+    let mut steps_log: Vec<StepLogEntry> = Vec::new();
+    let mut first_http_status: Option<i32> = None;
+    let mut last_http_status: Option<i32> = None;
 
-    if job.fetch_enabled != 0 {
-        let method = job.fetch_method.as_deref().unwrap_or("GET");
-        let url = non_empty_url(job.fetch_url.as_deref()).ok_or_else(|| AttemptFailure {
-            message: step_error_simple(lang, "fetch", "не указан URL"),
-            fetch_status: None,
-            send_status: None,
-            preview: None,
-            preview_truncated: false,
-        })?;
-        debug!(
-            job_id = %job.id,
-            method = method,
-            url = url,
-            "{}", LogMsg::StepFetch.text(lang)
-        );
-        let headers = parse_headers(job.fetch_headers.as_deref()).map_err(|e| AttemptFailure {
-            message: step_error_simple(lang, "fetch", &e),
-            fetch_status: None,
-            send_status: None,
-            preview: None,
-            preview_truncated: false,
-        })?;
-        match http_request(
-            client,
-            method,
-            url,
-            &headers,
-            job.fetch_body.as_deref(),
-            "fetch",
-            lang,
-            &ctx.cancel,
-        )
-        .await
-        {
-            Ok((status, body)) => {
-                fetch_status = Some(status);
-                if !(200..300).contains(&status) {
-                    let (preview, preview_truncated) = preview_for(ctx, &body);
-                    return Err(AttemptFailure {
-                        message: http_status_error(lang, "fetch", url, status, &body),
-                        fetch_status: Some(status),
-                        send_status: None,
-                        preview,
-                        preview_truncated,
-                    });
-                }
-                debug!(
-                    job_id = %job.id,
-                    status = status,
-                    body_len = body.len(),
-                    "{}", LogMsg::StepFetchDone.text(lang)
-                );
-                payload = Some(body);
+    for step in &steps {
+        if shutdown_requested(&ctx.cancel) {
+            return Err(AttemptFailure {
+                message: shutdown_error(lang),
+                fetch_status: first_http_status,
+                send_status: last_http_status,
+                output: Some(payload),
+                steps_log,
+            });
+        }
+
+        match step.kind {
+            StepKind::Http => {
+                run_http_step(
+                    ctx,
+                    job,
+                    client,
+                    step,
+                    &mut payload,
+                    &mut steps_log,
+                    &mut first_http_status,
+                    &mut last_http_status,
+                )
+                .await?;
             }
-            Err((status_opt, msg)) => {
-                return Err(AttemptFailure {
-                    message: msg,
-                    fetch_status: status_opt,
-                    send_status: None,
-                    preview: None,
-                    preview_truncated: false,
-                });
+            StepKind::Transform => {
+                run_transform_step(ctx, job, step, &mut payload, &mut steps_log, first_http_status, last_http_status)?;
+            }
+            StepKind::Command => {
+                run_command_step(
+                    ctx,
+                    job,
+                    step,
+                    &mut payload,
+                    &mut steps_log,
+                    first_http_status,
+                    last_http_status,
+                )
+                .await?;
             }
         }
     }
-
-    data = payload.unwrap_or_else(|| "{}".to_string());
-
-    if job.transform_enabled != 0 && ctx.enable_js {
-        let script = job
-            .transform_script
-            .as_deref()
-            .ok_or_else(|| {
-                let (preview, preview_truncated) = preview_for(ctx, &data);
-                AttemptFailure {
-                    message: step_error_simple(lang, "transform", "не указан скрипт"),
-                    fetch_status,
-                    send_status: None,
-                    preview,
-                    preview_truncated,
-                }
-            })?;
-        debug!(job_id = %job.id, "{}", LogMsg::StepTransform.text(lang));
-        data = run_transform(script, &data).map_err(|e| {
-            let (preview, preview_truncated) = preview_for(ctx, &data);
-            AttemptFailure {
-                message: step_error_simple(lang, "transform", &e),
-                fetch_status,
-                send_status: None,
-                preview,
-                preview_truncated,
-            }
-        })?;
-        debug!(
-            job_id = %job.id,
-            result_len = data.len(),
-            "{}", LogMsg::StepTransformDone.text(lang)
-        );
-    }
-
-    if job.send_enabled != 0 {
-        let method = job.send_method.as_deref().unwrap_or("POST");
-        let url = non_empty_url(job.send_url.as_deref()).ok_or_else(|| {
-            let (preview, preview_truncated) = preview_for(ctx, &data);
-            AttemptFailure {
-                message: step_error_simple(lang, "send", "не указан URL"),
-                fetch_status,
-                send_status: None,
-                preview,
-                preview_truncated,
-            }
-        })?;
-        debug!(
-            job_id = %job.id,
-            method = method,
-            url = url,
-            "{}", LogMsg::StepSend.text(lang)
-        );
-        let mut headers = parse_headers(job.send_headers.as_deref()).map_err(|e| {
-            let (preview, preview_truncated) = preview_for(ctx, &data);
-            AttemptFailure {
-                message: step_error_simple(lang, "send", &e),
-                fetch_status,
-                send_status: None,
-                preview,
-                preview_truncated,
-            }
-        })?;
-        let body = if let Some(template) = &job.send_body_template {
-            if template.contains("{{payload}}") {
-                template.replace("{{payload}}", &data)
-            } else {
-                template.clone()
-            }
-        } else {
-            data.clone()
-        };
-
-        if !headers.contains_key(CONTENT_TYPE) {
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        }
-
-        match http_request(
-            client,
-            method,
-            url,
-            &headers,
-            Some(&body),
-            "send",
-            lang,
-            &ctx.cancel,
-        )
-        .await
-        {
-            Ok((status, resp_body)) => {
-                send_status = Some(status);
-                if !(200..300).contains(&status) {
-                    let (preview, preview_truncated) = preview_for(ctx, &data);
-                    return Err(AttemptFailure {
-                        message: http_status_error(lang, "send", url, status, &resp_body),
-                        fetch_status,
-                        send_status: Some(status),
-                        preview,
-                        preview_truncated,
-                    });
-                }
-                debug!(
-                    job_id = %job.id,
-                    status = status,
-                    "{}", LogMsg::StepSendDone.text(lang)
-                );
-            }
-            Err((status_opt, msg)) => {
-                let (preview, preview_truncated) = preview_for(ctx, &data);
-                return Err(AttemptFailure {
-                    message: msg,
-                    fetch_status,
-                    send_status: status_opt,
-                    preview,
-                    preview_truncated,
-                });
-            }
-        }
-    }
-
-    let (preview_text, preview_truncated) = truncate_preview(&data, ctx.preview_max_bytes);
 
     Ok(StepResult {
+        fetch_status: first_http_status,
+        send_status: last_http_status,
+        output: Some(payload),
+        steps_log,
+    })
+}
+
+async fn run_http_step(
+    ctx: &ExecutionContext,
+    job: &JobRow,
+    client: &Client,
+    step: &JobStep,
+    payload: &mut String,
+    steps_log: &mut Vec<StepLogEntry>,
+    first_http_status: &mut Option<i32>,
+    last_http_status: &mut Option<i32>,
+) -> Result<(), AttemptFailure> {
+    let lang = ctx.log_lang;
+    let step_label = step_label(step);
+    let method = step.method.as_deref().unwrap_or("GET");
+    let url = non_empty_url(step.url.as_deref()).ok_or_else(|| {
+        fail_step(
+            lang,
+            &step_label,
+            "не указан URL",
+            *first_http_status,
+            *last_http_status,
+            payload,
+            steps_log,
+            step,
+            None,
+            None,
+            None,
+        )
+    })?;
+
+    debug!(
+        job_id = %job.id,
+        method = method,
+        url = url,
+        step_id = %step.id,
+        "{}", LogMsg::StepHttp.text(lang)
+    );
+
+    let headers = parse_headers(step.headers.as_deref()).map_err(|e| {
+        fail_step(
+            lang,
+            &step_label,
+            &e,
+            *first_http_status,
+            *last_http_status,
+            payload,
+            steps_log,
+            step,
+            None,
+            None,
+            None,
+        )
+    })?;
+
+    let body = resolve_http_body(step, payload);
+
+    match http_request(
+        client,
+        method,
+        url,
+        &headers,
+        body.as_deref(),
+        &step_label,
+        lang,
+        &ctx.cancel,
+    )
+    .await
+    {
+        Ok((status, body)) => {
+            if first_http_status.is_none() {
+                *first_http_status = Some(status);
+            }
+            *last_http_status = Some(status);
+
+            if !(200..300).contains(&status) {
+                steps_log.push(StepLogEntry {
+                    id: step.id.clone(),
+                    kind: StepKind::Http,
+                    name: step.name.clone(),
+                    http_status: Some(status),
+                    exit_code: None,
+                    output: Some(body.clone()),
+                    error: Some(http_status_error(lang, &step_label, url, status, &body)),
+                });
+                return Err(AttemptFailure {
+                    message: http_status_error(lang, &step_label, url, status, &body),
+                    fetch_status: *first_http_status,
+                    send_status: *last_http_status,
+                    output: Some(payload.clone()),
+                    steps_log: steps_log.clone(),
+                });
+            }
+
+            debug!(
+                job_id = %job.id,
+                status = status,
+                body_len = body.len(),
+                "{}", LogMsg::StepHttpDone.text(lang)
+            );
+
+            steps_log.push(StepLogEntry {
+                id: step.id.clone(),
+                kind: StepKind::Http,
+                name: step.name.clone(),
+                http_status: Some(status),
+                exit_code: None,
+                output: Some(body.clone()),
+                error: None,
+            });
+
+            if step.capture_output {
+                *payload = body;
+            }
+            Ok(())
+        }
+        Err((status_opt, msg)) => {
+            if let Some(status) = status_opt {
+                if first_http_status.is_none() {
+                    *first_http_status = Some(status);
+                }
+                *last_http_status = Some(status);
+            }
+            steps_log.push(StepLogEntry {
+                id: step.id.clone(),
+                kind: StepKind::Http,
+                name: step.name.clone(),
+                http_status: status_opt,
+                exit_code: None,
+                output: None,
+                error: Some(msg.clone()),
+            });
+            Err(AttemptFailure {
+                message: msg,
+                fetch_status: *first_http_status,
+                send_status: *last_http_status,
+                output: Some(payload.clone()),
+                steps_log: steps_log.clone(),
+            })
+        }
+    }
+}
+
+fn resolve_http_body(step: &JobStep, payload: &str) -> Option<String> {
+    if step.body_from_payload {
+        return Some(payload.to_string());
+    }
+    if let Some(template) = &step.body {
+        if template.contains("{{payload}}") {
+            return Some(template.replace("{{payload}}", payload));
+        }
+        if !template.trim().is_empty() {
+            return Some(template.clone());
+        }
+    }
+    None
+}
+
+fn run_transform_step(
+    ctx: &ExecutionContext,
+    job: &JobRow,
+    step: &JobStep,
+    payload: &mut String,
+    steps_log: &mut Vec<StepLogEntry>,
+    first_http_status: Option<i32>,
+    last_http_status: Option<i32>,
+) -> Result<(), AttemptFailure> {
+    let lang = ctx.log_lang;
+    let step_label = step_label(step);
+
+    if !ctx.enable_js {
+        debug!(job_id = %job.id, "{}", LogMsg::StepTransformSkipped.text(lang));
+        steps_log.push(StepLogEntry {
+            id: step.id.clone(),
+            kind: StepKind::Transform,
+            name: step.name.clone(),
+            http_status: None,
+            exit_code: None,
+            output: Some(payload.clone()),
+            error: None,
+        });
+        return Ok(());
+    }
+
+    let script = step.script.as_deref().filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+        fail_step(
+            lang,
+            &step_label,
+            "не указан скрипт",
+            first_http_status,
+            last_http_status,
+            payload,
+            steps_log,
+            step,
+            None,
+            None,
+            Some(payload.clone()),
+        )
+    })?;
+
+    debug!(job_id = %job.id, "{}", LogMsg::StepTransform.text(lang));
+    let out = run_transform(script, payload).map_err(|e| {
+        fail_step(
+            lang,
+            &step_label,
+            &e,
+            first_http_status,
+            last_http_status,
+            payload,
+            steps_log,
+            step,
+            None,
+            None,
+            Some(payload.clone()),
+        )
+    })?;
+
+    debug!(
+        job_id = %job.id,
+        result_len = out.len(),
+        "{}", LogMsg::StepTransformDone.text(lang)
+    );
+
+    steps_log.push(StepLogEntry {
+        id: step.id.clone(),
+        kind: StepKind::Transform,
+        name: step.name.clone(),
+        http_status: None,
+        exit_code: None,
+        output: Some(out.clone()),
+        error: None,
+    });
+
+    if step.capture_output {
+        *payload = out;
+    }
+    Ok(())
+}
+
+async fn run_command_step(
+    ctx: &ExecutionContext,
+    job: &JobRow,
+    step: &JobStep,
+    payload: &mut String,
+    steps_log: &mut Vec<StepLogEntry>,
+    first_http_status: Option<i32>,
+    last_http_status: Option<i32>,
+) -> Result<(), AttemptFailure> {
+    let lang = ctx.log_lang;
+    let step_label = step_label(step);
+    let program = step
+        .program
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            fail_step(
+                lang,
+                &step_label,
+                "не указана программа",
+                first_http_status,
+                last_http_status,
+                payload,
+                steps_log,
+                step,
+                None,
+                None,
+                None,
+            )
+        })?;
+
+    // ponytail: UI/пользователь часто пишет `-t processor` одним токеном — режем по whitespace
+    let args = flatten_command_args(&step.args);
+
+    debug!(
+        job_id = %job.id,
+        program = program,
+        args = ?args,
+        "{}", LogMsg::StepCommand.text(lang)
+    );
+
+    let mut cmd = Command::new(program);
+    cmd.args(&args);
+    if let Some(cwd) = step.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        cmd.current_dir(cwd);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    if shutdown_requested(&ctx.cancel) {
+        return Err(AttemptFailure {
+            message: shutdown_error(lang),
+            fetch_status: first_http_status,
+            send_status: last_http_status,
+            output: Some(payload.clone()),
+            steps_log: steps_log.clone(),
+        });
+    }
+
+    let mut child = cmd.spawn().map_err(|e| {
+        fail_step(
+            lang,
+            &step_label,
+            &format!("запуск: {e}"),
+            first_http_status,
+            last_http_status,
+            payload,
+            steps_log,
+            step,
+            None,
+            None,
+            None,
+        )
+    })?;
+
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let mut cancel = ctx.cancel.clone();
+    let timeout = Duration::from_secs(ctx.http_timeout_secs);
+
+    let wait_fut = async {
+        let stdout_task = async {
+            let mut buf = Vec::new();
+            if let Some(ref mut out) = stdout {
+                out.read_to_end(&mut buf).await.map_err(|e| e.to_string())?;
+            }
+            Ok::<_, String>(buf)
+        };
+        let stderr_task = async {
+            let mut buf = Vec::new();
+            if let Some(ref mut err) = stderr {
+                err.read_to_end(&mut buf).await.map_err(|e| e.to_string())?;
+            }
+            Ok::<_, String>(buf)
+        };
+        let (stdout_res, stderr_res) = tokio::join!(stdout_task, stderr_task);
+        let status = child.wait().await.map_err(|e| e.to_string())?;
+        Ok::<_, String>((status, stdout_res?, stderr_res?))
+    };
+
+    let (status, stdout_bytes, stderr_bytes) = tokio::select! {
+        res = wait_fut => res.map_err(|e| {
+            fail_step(
+                lang,
+                &step_label,
+                &e,
+                first_http_status,
+                last_http_status,
+                payload,
+                steps_log,
+                step,
+                None,
+                None,
+                None,
+            )
+        })?,
+        _ = tokio::time::sleep(timeout) => {
+            let _ = child.kill().await;
+            return Err(fail_step(
+                lang,
+                &step_label,
+                "таймаут",
+                first_http_status,
+                last_http_status,
+                payload,
+                steps_log,
+                step,
+                None,
+                None,
+                None,
+            ));
+        }
+        _ = wait_for_shutdown(&mut cancel) => {
+            let _ = child.kill().await;
+            return Err(AttemptFailure {
+                message: shutdown_error(lang),
+                fetch_status: first_http_status,
+                send_status: last_http_status,
+                output: Some(payload.clone()),
+                steps_log: steps_log.clone(),
+            });
+        }
+    };
+
+    if stdout_bytes.len() > MAX_STEP_OUTPUT_BYTES || stderr_bytes.len() > MAX_STEP_OUTPUT_BYTES {
+        return Err(fail_step(
+            lang,
+            &step_label,
+            &format!("вывод больше лимита {MAX_STEP_OUTPUT_BYTES} байт"),
+            first_http_status,
+            last_http_status,
+            payload,
+            steps_log,
+            step,
+            None,
+            status.code(),
+            None,
+        ));
+    }
+
+    let stdout_text = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    let stderr_text = String::from_utf8_lossy(&stderr_bytes).into_owned();
+    let combined = if stderr_text.is_empty() {
+        stdout_text.clone()
+    } else if stdout_text.is_empty() {
+        stderr_text.clone()
+    } else {
+        format!("{stdout_text}\n--- stderr ---\n{stderr_text}")
+    };
+
+    if !stdout_text.is_empty() {
+        info!(job_id = %job.id, step = %step_label, "command stdout:\n{stdout_text}");
+    }
+    if !stderr_text.is_empty() {
+        info!(job_id = %job.id, step = %step_label, "command stderr:\n{stderr_text}");
+    }
+
+    let exit_code = status.code();
+    if !status.success() {
+        let msg = match lang {
+            LogLang::Ru => format!(
+                "шаг={step_label}; код выхода={}; вывод: {combined}",
+                exit_code.map(|c| c.to_string()).unwrap_or_else(|| "—".into())
+            ),
+            LogLang::En => format!(
+                "step={step_label}; exit_code={}; output: {combined}",
+                exit_code.map(|c| c.to_string()).unwrap_or_else(|| "—".into())
+            ),
+        };
+        steps_log.push(StepLogEntry {
+            id: step.id.clone(),
+            kind: StepKind::Command,
+            name: step.name.clone(),
+            http_status: None,
+            exit_code,
+            output: Some(combined),
+            error: Some(msg.clone()),
+        });
+        return Err(AttemptFailure {
+            message: msg,
+            fetch_status: first_http_status,
+            send_status: last_http_status,
+            output: Some(payload.clone()),
+            steps_log: steps_log.clone(),
+        });
+    }
+
+    debug!(
+        job_id = %job.id,
+        exit_code = ?exit_code,
+        "{}", LogMsg::StepCommandDone.text(lang)
+    );
+
+    steps_log.push(StepLogEntry {
+        id: step.id.clone(),
+        kind: StepKind::Command,
+        name: step.name.clone(),
+        http_status: None,
+        exit_code,
+        output: Some(combined.clone()),
+        error: None,
+    });
+
+    if step.capture_output {
+        *payload = stdout_text;
+    }
+    Ok(())
+}
+
+fn fail_step(
+    lang: LogLang,
+    step_label: &str,
+    detail: &str,
+    fetch_status: Option<i32>,
+    send_status: Option<i32>,
+    payload: &str,
+    steps_log: &mut Vec<StepLogEntry>,
+    step: &JobStep,
+    http_status: Option<i32>,
+    exit_code: Option<i32>,
+    output: Option<String>,
+) -> AttemptFailure {
+    let message = step_error_simple(lang, step_label, detail);
+    steps_log.push(StepLogEntry {
+        id: step.id.clone(),
+        kind: step.kind.clone(),
+        name: step.name.clone(),
+        http_status,
+        exit_code,
+        output,
+        error: Some(message.clone()),
+    });
+    AttemptFailure {
+        message,
         fetch_status,
         send_status,
-        preview: Some(preview_text),
-        preview_truncated,
-    })
+        output: Some(payload.to_string()),
+        steps_log: steps_log.clone(),
+    }
+}
+
+fn flatten_command_args(args: &[String]) -> Vec<String> {
+    args.iter()
+        .flat_map(|a| a.split_whitespace().map(str::to_string))
+        .collect()
+}
+
+fn step_label(step: &JobStep) -> String {
+    step.name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| match step.kind {
+            StepKind::Http => "http".into(),
+            StepKind::Transform => "transform".into(),
+            StepKind::Command => "command".into(),
+        })
 }
 
 /// Выполняет HTTP-запрос и возвращает код ответа и тело (UTF-8).
@@ -443,6 +824,7 @@ async fn http_request(
         "GET" => client.get(url),
         "POST" => client.post(url),
         "PUT" => client.put(url),
+        "DELETE" => client.delete(url),
         _ => {
             return Err((
                 None,
@@ -454,8 +836,18 @@ async fn http_request(
     req = req.headers(headers.clone());
     if let Some(b) = body {
         if !b.is_empty() {
+            if !headers.contains_key(CONTENT_TYPE)
+                && matches!(method.as_str(), "POST" | "PUT")
+            {
+                // Content-Type задаётся ниже через headers clone — добавим в builder
+            }
             req = req.body(b.to_string());
         }
+    }
+
+    // Для POST/PUT без Content-Type — application/json
+    if matches!(method.as_str(), "POST" | "PUT") && !headers.contains_key(CONTENT_TYPE) {
+        req = req.header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     }
 
     if shutdown_requested(cancel) {
@@ -480,7 +872,7 @@ async fn http_request(
         .map_err(|(status, msg)| (Some(status), msg))
 }
 
-/// Читает тело ответа как байты и проверяет UTF-8 (вместо `text()`, дающего «error decoding response body»).
+/// Читает тело ответа как байты и проверяет UTF-8.
 async fn read_response_body(
     resp: reqwest::Response,
     step: &str,
@@ -517,10 +909,10 @@ async fn read_response_body(
     })?;
 
     let byte_len = bytes.len();
-    if byte_len > MAX_RESPONSE_BODY_BYTES {
+    if byte_len > MAX_STEP_OUTPUT_BYTES {
         let size_detail = match lang {
-            LogLang::Ru => format!("тело больше лимита {MAX_RESPONSE_BODY_BYTES} байт"),
-            LogLang::En => format!("body exceeds limit of {MAX_RESPONSE_BODY_BYTES} bytes"),
+            LogLang::Ru => format!("тело больше лимита {MAX_STEP_OUTPUT_BYTES} байт"),
+            LogLang::En => format!("body exceeds limit of {MAX_STEP_OUTPUT_BYTES} bytes"),
         };
         return Err((
             status,
@@ -576,14 +968,11 @@ async fn read_response_body(
 }
 
 fn http_status_error(lang: LogLang, step: &str, url: &str, status: i32, body: &str) -> String {
+    // ponytail: в тексте ошибки HTTP оставляем короткий фрагмент; полный body — в steps_log
     let preview = truncate(body, 200);
     match lang {
-        LogLang::Ru => format!(
-            "шаг={step}; url={url}; HTTP={status}; ответ: {preview}"
-        ),
-        LogLang::En => format!(
-            "step={step}; url={url}; HTTP={status}; response: {preview}"
-        ),
+        LogLang::Ru => format!("шаг={step}; url={url}; HTTP={status}; ответ: {preview}"),
+        LogLang::En => format!("step={step}; url={url}; HTTP={status}; response: {preview}"),
     }
 }
 
@@ -607,10 +996,7 @@ fn http_body_error(
 ) -> String {
     let status_s = status
         .map(|s| s.to_string())
-        .unwrap_or_else(|| match lang {
-            LogLang::Ru => "—".into(),
-            LogLang::En => "—".into(),
-        });
+        .unwrap_or_else(|| "—".into());
     let len_hint = content_length
         .map(|n| n.to_string())
         .unwrap_or_else(|| match lang {
@@ -629,7 +1015,6 @@ fn http_body_error(
     }
 }
 
-/// Короткое превью бинарного или битого тела для журнала.
 fn body_snippet(bytes: &[u8]) -> String {
     const MAX: usize = 80;
     let slice = &bytes[..bytes.len().min(MAX)];
@@ -641,7 +1026,6 @@ fn body_snippet(bytes: &[u8]) -> String {
     }
 }
 
-/// Разбирает заголовки из JSON-объекта (`{"Authorization": "Bearer …"}`).
 fn parse_headers(raw: Option<&str>) -> Result<HeaderMap, String> {
     let mut map = HeaderMap::new();
     let Some(raw) = raw else {
@@ -695,7 +1079,6 @@ pub fn run_transform(script: &str, input_json: &str) -> Result<String, String> {
     js_value_to_json_string(&result, &mut context)
 }
 
-/// Сериализует результат JS через `JSON.stringify`.
 fn js_value_to_json_string(value: &JsValue, context: &mut Context) -> Result<String, String> {
     if value.is_undefined() || value.is_null() {
         return Ok("null".to_string());
@@ -714,7 +1097,6 @@ fn js_value_to_json_string(value: &JsValue, context: &mut Context) -> Result<Str
         .ok_or_else(|| "результат преобразования не сериализуется в JSON".to_string())
 }
 
-/// Возвращает URL, если строка не пустая после trim.
 fn non_empty_url(url: Option<&str>) -> Option<&str> {
     url.and_then(|s| {
         let t = s.trim();
@@ -726,7 +1108,6 @@ fn non_empty_url(url: Option<&str>) -> Option<&str> {
     })
 }
 
-/// Обрезает строку для превью в журнале; возвращает текст и флаг обрезки.
 fn truncate_preview(s: &str, max: usize) -> (String, bool) {
     if s.len() <= max {
         return (s.to_string(), false);
@@ -738,19 +1119,14 @@ fn truncate_preview(s: &str, max: usize) -> (String, bool) {
     (format!("{}…", &s[..end]), true)
 }
 
-/// Короткий фрагмент для встраивания в текст ошибки HTTP.
 fn truncate(s: &str, max: usize) -> String {
     truncate_preview(s, max).0
 }
 
-fn preview_for(ctx: &ExecutionContext, s: &str) -> (Option<String>, bool) {
-    let (text, truncated) = truncate_preview(s, ctx.preview_max_bytes);
-    (Some(text), truncated)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::run_transform;
+    use super::*;
+    use crate::models::JobStep;
 
     #[test]
     fn transform_maps_users() {
@@ -758,5 +1134,42 @@ mod tests {
         let script = "return input.users.map(x => ({ username: x.name }));";
         let out = run_transform(script, input).unwrap();
         assert!(out.contains("username"));
+    }
+
+    #[test]
+    fn resolve_body_from_payload() {
+        let mut step = JobStep::new_http();
+        step.body_from_payload = true;
+        assert_eq!(
+            resolve_http_body(&step, r#"{"a":1}"#).as_deref(),
+            Some(r#"{"a":1}"#)
+        );
+    }
+
+    #[test]
+    fn flatten_splits_spaced_token() {
+        let args = vec!["-t processor".into()];
+        assert_eq!(
+            flatten_command_args(&args),
+            vec!["-t".to_string(), "processor".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn command_echo_stdout() {
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "echo", "hello-steps"]);
+            c
+        } else {
+            let mut c = Command::new("echo");
+            c.arg("hello-steps");
+            c
+        };
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = cmd.output().await.expect("spawn echo");
+        assert!(out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("hello-steps"));
     }
 }

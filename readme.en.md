@@ -2,20 +2,21 @@
 
 **Русский:** [README.md](README.md)
 
-HTTP task scheduler in Rust: interval / cron / one-time schedules, fetch → JS transform → send pipeline, SQLite storage, and a Vue + Tailwind web UI (local static assets, no build step, no Node.js).
+HTTP task scheduler in Rust: interval / cron / one-time schedules, a step constructor (HTTP / JS / local command), SQLite storage, and a Vue + Tailwind web UI (local static assets, no build step, no Node.js).
 
 ## Features
 
-- REST API and web UI: dashboard, job list, create/edit form, execution log.
+- REST API and web UI: dashboard, job list, form with step constructor, execution log.
 - Schedule types: interval (`5m`, `2h`, `1d`), cron (5 fields, UTC), one-time run.
-- Job pipeline: HTTP fetch → optional JS (boa) → HTTP send.
+- Job pipeline: ordered `http` / `transform` / `command` steps (add, remove, reorder).
+- Local commands: program + args (no shell); stdout/stderr go to the journal.
 - Retries on failure (configurable count and interval).
 - Scheduler tick loop, concurrent run limit, manual “run now”.
 - SQLite for jobs and execution history; automatic purge of old log rows.
 - Server logs to stdout and rotating log files.
 - UI and server message localization (`ru` / `en`).
 - Web UI on Vue 3 and Tailwind: all assets live in `web/`; no required Node.js.
-- Server-side job field validation (only enabled sections are checked).
+- Server-side job field validation (per step kind).
 
 ## Requirements
 
@@ -60,14 +61,13 @@ Prefix **`AJS_`** (see `.env.example`):
 | `AJS_LOG_LEVEL`                      | Log level (`tracing`)                                                                                        | `info`           |
 | `AJS_DEFAULT_LANGUAGE`               | Default server/UI language: `ru` or `en`                                                                     | `en`             |
 | `AJS_MAX_CONCURRENT_JOBS`            | Max parallel job executions                                                                                  | `10`             |
-| `AJS_HTTP_TIMEOUT_SECONDS`           | HTTP fetch/send timeout (seconds)                                                                            | `60`             |
-| `AJS_JOB_TICK_INTERVAL_MS`           | Scheduler tick interval (ms)                                                                                 | `1000`           |
-| `AJS_ENABLE_JS_TRANSFORM`            | Enable JS transform (`true`/`false`)                                                                         | `true`           |
-| `AJS_RETENTION_DAYS`                 | Execution log retention (days)                                                                               | `30`             |
-| `AJS_LOG_RESPONSE_PREVIEW_MAX_BYTES` | Max `response_preview` size in SQLite execution logs (UTF-8 bytes)                                           | `500`            |
-| `AJS_LOG_DIR`                        | File log directory (relative to cwd or absolute)                                                             | `./logs`         |
-| `AJS_RUN_OVERDUE_ON_STARTUP`         | Run overdue jobs right after startup (`true`) or reschedule `next_run_at` from now without running (`false`) | `true`           |
-| `AJS_DISABLE_ALL_JOBS_ON_STARTUP`    | Disable all jobs in the DB on startup (`enabled = 0`); enable manually in the UI                             | `false`          |
+| `AJS_HTTP_TIMEOUT_SECONDS`        | HTTP and local command timeout (seconds)                                                                     | `60`             |
+| `AJS_JOB_TICK_INTERVAL_MS`        | Scheduler tick interval (ms)                                                                                 | `1000`           |
+| `AJS_ENABLE_JS_TRANSFORM`         | Enable JS transform (`true`/`false`)                                                                         | `true`           |
+| `AJS_RETENTION_DAYS`              | Execution log retention (days)                                                                               | `30`             |
+| `AJS_LOG_DIR`                     | File log directory (relative to cwd or absolute)                                                             | `./logs`         |
+| `AJS_RUN_OVERDUE_ON_STARTUP`      | Run overdue jobs right after startup (`true`) or reschedule `next_run_at` from now without running (`false`) | `true`           |
+| `AJS_DISABLE_ALL_JOBS_ON_STARTUP` | Disable all jobs in the DB on startup (`enabled = 0`); enable manually in the UI                             | `false`          |
 
 ### Startup behavior
 
@@ -89,8 +89,9 @@ Typical manual-control setup: `AJS_DISABLE_ALL_JOBS_ON_STARTUP=true`, optionally
   - archived files: up to **10** (plus the active file)
   - naming: `scheduler.log`, `scheduler.1.log`, `scheduler.2.log`, …
 - **Job execution history** is stored in SQLite (`execution_logs`), not in server log files.
-  - Column **`response_preview`** holds a short snippet for the UI (limit `AJS_LOG_RESPONSE_PREVIEW_MAX_BYTES`, default 500 bytes). Longer bodies are cut with a trailing `…` and `preview_truncated` is set.
-  - The job pipeline (fetch → transform → send) uses the **full** HTTP body in memory; it is **not** stored whole in the database.
+  - Column **`response_preview`** holds the full final payload (no silent truncation).
+  - Column **`steps_log`** is JSON with each step’s result (HTTP status / exit code, full output).
+  - Hard cap per step output is **10 MB**; exceeding it fails the step instead of truncating.
 
 ## REST API
 
@@ -99,7 +100,7 @@ Base prefix: `/api`. Request bodies are JSON.
 | Method   | Path                      | Description                                                       |
 | -------- | ------------------------- | ----------------------------------------------------------------- |
 | `GET`    | `/api/dashboard`          | Stats and recent runs                                             |
-| `GET`    | `/api/settings`           | Public UI settings (execution log preview limit)                  |
+| `GET`    | `/api/settings`           | Public UI settings (`max_step_output_bytes`)                  |
 | `GET`    | `/api/jobs`               | List jobs                                                         |
 | `POST`   | `/api/jobs`               | Create job                                                        |
 | `PUT`    | `/api/jobs/{id}`          | Update job                                                        |
@@ -127,28 +128,32 @@ On the **Jobs** page: optional **group** label (stored in the DB), filters by na
 
 ### Job pipeline
 
-1. **Fetch** (if enabled) — HTTP GET/POST; response body passed as JSON to later steps.
-2. **Transform** (if enabled) — JS in boa sandbox: variable `input`, result via `return …`.
-3. **Send** (if enabled) — HTTP POST/PUT; body template `{{payload}}` is replaced with the result.
+A job stores an ordered JSON **`steps`** array. A **`payload`** string is passed between steps (default `{}`).
 
-On any step failure — retries (if enabled), then a log row and `next_run_at` recalculation.
+Step kinds:
+
+1. **`http`** — HTTP GET/POST/PUT/DELETE; body from `body`, from `payload` (`body_from_payload`), or with `{{payload}}` substitution.
+2. **`transform`** — JS in boa sandbox: variable `input`, result via `return …` (can be disabled globally with `AJS_ENABLE_JS_TRANSFORM=false`).
+3. **`command`** — local process without a shell: `program` + args (space-separated, e.g. `-t processor`); stdout/stderr go to logs and the journal; non-zero exit fails the step.
+
+**`capture_output`** on a step controls whether its output (response body / stdout / JS result) becomes the `payload` for later steps.
+
+On any step failure — retries of the whole pipeline (if enabled), then a log row and `next_run_at` recalculation. Legacy jobs with fetch/transform/send columns migrate to `steps` on startup.
 
 ### Validation on save
 
-Only **enabled** sections are validated:
-
 - **General:** non-empty name.
 - **Schedule:** interval / cron / future one-time datetime.
-- **Fetch:** `http(s)://` URL, GET or POST, headers as JSON object.
-- **Transform:** non-empty script.
-- **Send:** `http(s)://` URL, POST or PUT, headers as JSON object.
+- **http step:** `http(s)://` URL, GET/POST/PUT/DELETE, headers as JSON object.
+- **transform step:** non-empty script.
+- **command step:** non-empty program; args must not contain NUL.
 - **Retry:** `max_retries ≥ 0`, `retry_interval_seconds ≥ 1`.
 
 Errors return **400** with an `error` field (language follows `AJS_DEFAULT_LANGUAGE`).
 
 ## Examples
 
-### Create a job (5-minute interval, fetch only)
+### Create a job (5-minute interval, one HTTP step)
 
 ```bash
 curl -s -X POST http://127.0.0.1:3000/api/jobs \
@@ -158,16 +163,36 @@ curl -s -X POST http://127.0.0.1:3000/api/jobs \
     "enabled": true,
     "schedule_type": "interval",
     "schedule_value": "5m",
-    "fetch_enabled": true,
-    "fetch_method": "GET",
-    "fetch_url": "https://httpbin.org/get",
-    "fetch_headers": "{}",
-    "transform_enabled": false,
-    "send_enabled": false,
+    "steps": [
+      {
+        "id": "1",
+        "kind": "http",
+        "name": "Fetch",
+        "method": "GET",
+        "url": "https://httpbin.org/get",
+        "headers": "{}",
+        "capture_output": true
+      }
+    ],
     "retry_enabled": true,
     "max_retries": 2,
     "retry_interval_seconds": 30
   }'
+```
+
+### Local command
+
+```json
+"steps": [
+  {
+    "id": "1",
+    "kind": "command",
+    "name": "CPU info",
+    "program": "dmidecode",
+    "args": ["-t", "processor"],
+    "capture_output": true
+  }
+]
 ```
 
 ### Manual run
@@ -191,8 +216,8 @@ src/
 ├── api.rs          — REST handlers
 ├── scheduler.rs    — tick loop, schedule calculation
 ├── jobs.rs         — job CRUD and SQLite execution log
-├── execution.rs    — fetch / JS / send pipeline
-├── validation.rs   — JobInput validation
+├── execution.rs    — http / transform / command step loop
+├── validation.rs   — JobInput and step validation
 ├── logging.rs      — rotating file logs
 ├── database.rs     — SQLite pool, migrations
 ├── models.rs       — domain types
@@ -211,6 +236,7 @@ migrations/         — SQL schema
 ## Limitations
 
 - JS transform: no Node.js APIs (network, filesystem, `require`); each run uses a fresh boa context.
+- `command` steps run **without a shell** (no pipes/`&&`); args are separate tokens.
 - Cron and one-time schedules use **UTC**.
 - `next_run_at` comparison in SQLite is lexicographic on RFC3339 strings; keep datetime formats consistent.
 - Cron expressions use 5 fields (minute, hour, day of month, month, day of week), classic Unix style.

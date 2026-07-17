@@ -1,6 +1,7 @@
 //! Подключение к SQLite, миграции схемы и обслуживание журнала.
 
 use crate::i18n::{LogLang, LogMsg};
+use crate::models::{legacy_columns_to_steps, steps_to_json, JobRow};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::time::Duration;
@@ -29,7 +30,7 @@ pub async fn init_pool(db_path: &str, lang: LogLang) -> Result<DbPool, sqlx::Err
     Ok(pool)
 }
 
-/// Выполняет SQL-скрипты из каталога `migrations/`.
+/// Выполняет SQL-скрипты из каталога `migrations/` и ensure-миграции.
 async fn run_migrations(pool: &DbPool, lang: LogLang) -> Result<(), sqlx::Error> {
     let sql = include_str!("../migrations/001_init.sql");
     let mut count = 0usize;
@@ -43,22 +44,32 @@ async fn run_migrations(pool: &DbPool, lang: LogLang) -> Result<(), sqlx::Error>
     if ensure_job_group_column(pool).await? {
         count += 1;
     }
+    if ensure_jobs_steps_column(pool).await? {
+        count += 1;
+    }
+    if ensure_execution_log_steps_log(pool).await? {
+        count += 1;
+    }
+    migrate_legacy_steps_into_json(pool).await?;
     debug!(statements = count, "{}", LogMsg::MigrationsApplied.text(lang));
     info!("{}", LogMsg::MigrationsApplied.text(lang));
     Ok(())
 }
 
-/// Добавляет колонку `preview_truncated`, если база создана до появления флага обрезки превью.
-async fn ensure_execution_log_preview_truncated(pool: &DbPool) -> Result<bool, sqlx::Error> {
-    let rows = sqlx::query("PRAGMA table_info(execution_logs)")
+async fn table_has_column(pool: &DbPool, table: &str, column: &str) -> Result<bool, sqlx::Error> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
         .fetch_all(pool)
         .await?;
-    let has_column = rows.iter().any(|row| {
+    Ok(rows.iter().any(|row| {
         row.try_get::<String, _>(1)
-            .map(|name| name == "preview_truncated")
+            .map(|name| name == column)
             .unwrap_or(false)
-    });
-    if has_column {
+    }))
+}
+
+/// Добавляет колонку `preview_truncated`, если база создана до появления флага обрезки превью.
+async fn ensure_execution_log_preview_truncated(pool: &DbPool) -> Result<bool, sqlx::Error> {
+    if table_has_column(pool, "execution_logs", "preview_truncated").await? {
         return Ok(false);
     }
     sqlx::query(
@@ -71,21 +82,74 @@ async fn ensure_execution_log_preview_truncated(pool: &DbPool) -> Result<bool, s
 
 /// Добавляет колонку `job_group` для косметической группировки в UI.
 async fn ensure_job_group_column(pool: &DbPool) -> Result<bool, sqlx::Error> {
-    let rows = sqlx::query("PRAGMA table_info(jobs)")
-        .fetch_all(pool)
-        .await?;
-    let has_column = rows.iter().any(|row| {
-        row.try_get::<String, _>(1)
-            .map(|name| name == "job_group")
-            .unwrap_or(false)
-    });
-    if has_column {
+    if table_has_column(pool, "jobs", "job_group").await? {
         return Ok(false);
     }
     sqlx::query("ALTER TABLE jobs ADD COLUMN job_group TEXT")
         .execute(pool)
         .await?;
     Ok(true)
+}
+
+/// Добавляет JSON-колонку `steps` для упорядоченного пайплайна.
+async fn ensure_jobs_steps_column(pool: &DbPool) -> Result<bool, sqlx::Error> {
+    if table_has_column(pool, "jobs", "steps").await? {
+        return Ok(false);
+    }
+    sqlx::query("ALTER TABLE jobs ADD COLUMN steps TEXT NOT NULL DEFAULT '[]'")
+        .execute(pool)
+        .await?;
+    Ok(true)
+}
+
+/// Добавляет `steps_log` — полный JSON результатов шагов.
+async fn ensure_execution_log_steps_log(pool: &DbPool) -> Result<bool, sqlx::Error> {
+    if table_has_column(pool, "execution_logs", "steps_log").await? {
+        return Ok(false);
+    }
+    sqlx::query("ALTER TABLE execution_logs ADD COLUMN steps_log TEXT")
+        .execute(pool)
+        .await?;
+    Ok(true)
+}
+
+/// Конвертирует legacy fetch/transform/send в `steps`, если массив ещё пуст.
+async fn migrate_legacy_steps_into_json(pool: &DbPool) -> Result<(), sqlx::Error> {
+    let rows: Vec<JobRow> = sqlx::query_as(
+        r#"
+        SELECT * FROM jobs
+        WHERE steps IS NULL OR TRIM(steps) = '' OR TRIM(steps) = '[]'
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for row in rows {
+        let steps = legacy_columns_to_steps(
+            row.fetch_enabled != 0,
+            row.fetch_method.as_deref(),
+            row.fetch_url.as_deref(),
+            row.fetch_headers.as_deref(),
+            row.fetch_body.as_deref(),
+            row.transform_enabled != 0,
+            row.transform_script.as_deref(),
+            row.send_enabled != 0,
+            row.send_method.as_deref(),
+            row.send_url.as_deref(),
+            row.send_headers.as_deref(),
+            row.send_body_template.as_deref(),
+        );
+        if steps.is_empty() {
+            continue;
+        }
+        let json = steps_to_json(&steps);
+        sqlx::query("UPDATE jobs SET steps = ? WHERE id = ?")
+            .bind(&json)
+            .bind(&row.id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 
 /// Удаляет записи журнала старше указанного числа дней; возвращает число удалённых строк.

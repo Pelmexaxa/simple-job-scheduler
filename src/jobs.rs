@@ -2,8 +2,8 @@
 
 use crate::database::DbPool;
 use crate::models::{
-    now_rfc3339, schedule_type_str, DashboardStats, ExecutionLog, ExecutionLogRow, Job,
-    GroupEnabledResult, JobInput, JobRow, normalize_job_group,
+    now_rfc3339, normalize_job_group, schedule_type_str, steps_to_json, DashboardStats,
+    ExecutionLog, ExecutionLogRow, GroupEnabledResult, Job, JobInput, JobRow,
 };
 use crate::scheduler::compute_next_run;
 use uuid::Uuid;
@@ -78,14 +78,14 @@ pub async fn update_job(pool: &DbPool, id: &str, input: JobInput) -> Result<Opti
         existing.next_run_at.as_deref(),
     );
 
+    let steps_json = steps_to_json(&input.steps);
+
     sqlx::query(
         r#"
         UPDATE jobs SET
             name = ?, description = ?, job_group = ?, enabled = ?,
             schedule_type = ?, schedule_value = ?,
-            fetch_enabled = ?, fetch_method = ?, fetch_url = ?, fetch_headers = ?, fetch_body = ?,
-            transform_enabled = ?, transform_script = ?,
-            send_enabled = ?, send_method = ?, send_url = ?, send_headers = ?, send_body_template = ?,
+            steps = ?,
             retry_enabled = ?, max_retries = ?, retry_interval_seconds = ?,
             updated_at = ?, next_run_at = ?
         WHERE id = ?
@@ -97,18 +97,7 @@ pub async fn update_job(pool: &DbPool, id: &str, input: JobInput) -> Result<Opti
     .bind(i64::from(input.enabled))
     .bind(schedule_type_str(&input.schedule_type))
     .bind(&input.schedule_value)
-    .bind(i64::from(input.fetch_enabled))
-    .bind(&input.fetch_method)
-    .bind(&input.fetch_url)
-    .bind(&input.fetch_headers)
-    .bind(&input.fetch_body)
-    .bind(i64::from(input.transform_enabled))
-    .bind(&input.transform_script)
-    .bind(i64::from(input.send_enabled))
-    .bind(&input.send_method)
-    .bind(&input.send_url)
-    .bind(&input.send_headers)
-    .bind(&input.send_body_template)
+    .bind(&steps_json)
     .bind(i64::from(input.retry_enabled))
     .bind(input.max_retries)
     .bind(input.retry_interval_seconds)
@@ -215,8 +204,8 @@ pub async fn insert_log(
         INSERT INTO execution_logs (
             id, job_id, started_at, finished_at, status,
             fetch_status, send_status, duration_ms, error_message, response_preview,
-            preview_truncated
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            preview_truncated, steps_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&log.id)
@@ -230,6 +219,7 @@ pub async fn insert_log(
     .bind(&log.error_message)
     .bind(&log.response_preview)
     .bind(log.preview_truncated)
+    .bind(&log.steps_log)
     .execute(pool)
     .await?;
     Ok(())
@@ -298,22 +288,19 @@ async fn insert_job_row(
     now: &str,
     next_run: Option<&str>,
 ) -> Result<(), sqlx::Error> {
+    let steps_json = steps_to_json(&input.steps);
     sqlx::query(
         r#"
         INSERT INTO jobs (
             id, name, description, job_group, enabled,
-            schedule_type, schedule_value,
-            fetch_enabled, fetch_method, fetch_url, fetch_headers, fetch_body,
-            transform_enabled, transform_script,
-            send_enabled, send_method, send_url, send_headers, send_body_template,
+            schedule_type, schedule_value, steps,
+            fetch_enabled, transform_enabled, send_enabled,
             retry_enabled, max_retries, retry_interval_seconds,
             created_at, updated_at, last_run_at, next_run_at
         ) VALUES (
             ?, ?, ?, ?, ?,
-            ?, ?,
-            ?, ?, ?, ?, ?,
-            ?, ?,
-            ?, ?, ?, ?, ?,
+            ?, ?, ?,
+            0, 0, 0,
             ?, ?, ?,
             ?, ?, NULL, ?
         )
@@ -326,18 +313,7 @@ async fn insert_job_row(
     .bind(i64::from(input.enabled))
     .bind(schedule_type_str(&input.schedule_type))
     .bind(&input.schedule_value)
-    .bind(i64::from(input.fetch_enabled))
-    .bind(&input.fetch_method)
-    .bind(&input.fetch_url)
-    .bind(&input.fetch_headers)
-    .bind(&input.fetch_body)
-    .bind(i64::from(input.transform_enabled))
-    .bind(&input.transform_script)
-    .bind(i64::from(input.send_enabled))
-    .bind(&input.send_method)
-    .bind(&input.send_url)
-    .bind(&input.send_headers)
-    .bind(&input.send_body_template)
+    .bind(&steps_json)
     .bind(i64::from(input.retry_enabled))
     .bind(input.max_retries)
     .bind(input.retry_interval_seconds)

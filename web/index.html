@@ -273,72 +273,99 @@
 
           <div class="space-y-3">
         <fieldset class="bg-slate-900 border border-slate-800 rounded-md p-2.5 space-y-2">
-          <legend class="text-sm text-cyan-400 px-1">{{ t('section_fetch') }}</legend>
-          <field-hint :text="t('help_fetch_section')"></field-hint>
-          <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="form.fetch_enabled" /> {{ t('field_fetch_enabled') }}</label>
-          <div class="grid grid-cols-4 gap-2">
-            <label class="block text-sm col-span-1"><span class="text-slate-400">{{ t('field_fetch_method') }}</span>
-              <select v-model="form.fetch_method"
-                class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm">
-                <option>GET</option>
-                <option>POST</option>
-              </select></label>
-            <label class="block text-sm col-span-3"><span class="text-slate-400">{{ t('field_fetch_url') }}</span>
-              <input v-model="form.fetch_url"
-                class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" /></label>
+          <legend class="text-sm text-cyan-400 px-1">{{ t('section_steps') }}</legend>
+          <field-hint :text="t('help_steps_section')"></field-hint>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" @click="addStep('http')"
+              class="bg-slate-800 hover:bg-slate-700 px-2 py-1 rounded text-xs">{{ t('btn_add_http') }}</button>
+            <button type="button" @click="addStep('transform')"
+              class="bg-slate-800 hover:bg-slate-700 px-2 py-1 rounded text-xs">{{ t('btn_add_transform') }}</button>
+            <button type="button" @click="addStep('command')"
+              class="bg-slate-800 hover:bg-slate-700 px-2 py-1 rounded text-xs">{{ t('btn_add_command') }}</button>
           </div>
-          <label class="block text-sm"><span class="text-slate-400">{{ t('field_fetch_headers') }}</span>
-            <textarea v-model="form.fetch_headers" rows="2"
-              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
-          <field-hint :text="t('help_fetch_headers')"></field-hint>
-          <label class="block text-sm"><span class="text-slate-400">{{ t('field_fetch_body') }}</span>
-            <textarea v-model="form.fetch_body" rows="2"
-              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
-          <field-hint :text="t('help_fetch_body')"></field-hint>
-        </fieldset>
 
-        <fieldset class="bg-slate-900 border border-slate-800 rounded-md p-2.5 space-y-2">
-          <legend class="text-sm text-cyan-400 px-1">{{ t('section_transform') }}</legend>
-          <field-hint :text="t('help_transform_section')"></field-hint>
-          <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="form.transform_enabled" /> {{ t('field_transform_enabled') }}</label>
-          <label class="block text-sm"><span class="text-slate-400">{{ t('field_transform_script') }}</span>
-            <textarea v-model="form.transform_script" rows="4"
-              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
-          <collapse-panel :title="t('help_transform_examples')" v-model:open="showTransformExamples">
-            <field-hint :text="t('help_transform_rules')"></field-hint>
-            <div v-for="ex in transformExamples" :key="ex.id"
-              class="rounded border border-slate-800 bg-slate-900/50 p-1.5 space-y-1">
-              <div class="text-xs text-slate-200">{{ t(ex.titleKey) }}</div>
-              <div class="text-[11px] text-slate-400">{{ t(ex.descKey) }}</div>
-              <pre class="text-[11px] font-mono text-slate-300 bg-slate-950 rounded p-1.5 overflow-x-auto whitespace-pre-wrap">{{ ex.code }}</pre>
-              <button type="button" @click="applyTransformExample(ex.code)"
-                class="text-[11px] text-cyan-400 hover:text-cyan-300 hover:underline">{{ t('btn_insert_example') }}</button>
+          <div v-for="(step, idx) in form.steps" :key="step.id"
+            class="rounded border border-slate-800 bg-slate-950/40 p-2 space-y-2">
+            <div class="flex flex-wrap items-center gap-2 justify-between">
+              <div class="flex items-center gap-2 text-xs">
+                <span class="text-slate-500">#{{ idx + 1 }}</span>
+                <span class="text-cyan-400 font-medium">{{ t('step_kind_' + step.kind) }}</span>
+              </div>
+              <div class="flex gap-1">
+                <button type="button" @click="moveStep(idx, -1)" :disabled="idx === 0"
+                  class="bg-slate-800 hover:bg-slate-700 disabled:opacity-40 px-2 py-0.5 rounded text-[11px]">{{ t('btn_step_up') }}</button>
+                <button type="button" @click="moveStep(idx, 1)" :disabled="idx === form.steps.length - 1"
+                  class="bg-slate-800 hover:bg-slate-700 disabled:opacity-40 px-2 py-0.5 rounded text-[11px]">{{ t('btn_step_down') }}</button>
+                <button type="button" @click="removeStep(idx)"
+                  class="bg-red-950/60 hover:bg-red-900/60 text-red-300 px-2 py-0.5 rounded text-[11px]">{{ t('btn_step_remove') }}</button>
+              </div>
             </div>
-          </collapse-panel>
-        </fieldset>
 
-        <fieldset class="bg-slate-900 border border-slate-800 rounded-md p-2.5 space-y-2">
-          <legend class="text-sm text-cyan-400 px-1">{{ t('section_send') }}</legend>
-          <field-hint :text="t('help_send_section')"></field-hint>
-          <label class="flex items-center gap-2 text-sm"><input type="checkbox" v-model="form.send_enabled" /> {{ t('field_send_enabled') }}</label>
-          <div class="grid grid-cols-2 gap-2">
-            <label class="block text-sm"><span class="text-slate-400">{{ t('field_send_method') }}</span>
-              <select v-model="form.send_method"
-                class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm">
-                <option>POST</option>
-                <option>PUT</option>
-              </select></label>
-            <label class="block text-sm"><span class="text-slate-400">{{ t('field_send_url') }}</span>
-              <input v-model="form.send_url"
+            <label class="block text-sm"><span class="text-slate-400">{{ t('field_step_name') }}</span>
+              <input v-model="step.name"
                 class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" /></label>
+            <label class="flex items-center gap-2 text-sm">
+              <input type="checkbox" v-model="step.capture_output" /> {{ t('field_capture_output') }}
+            </label>
+
+            <template v-if="step.kind === 'http'">
+              <div class="grid grid-cols-4 gap-2">
+                <label class="block text-sm col-span-1"><span class="text-slate-400">{{ t('field_http_method') }}</span>
+                  <select v-model="step.method"
+                    class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm">
+                    <option>GET</option>
+                    <option>POST</option>
+                    <option>PUT</option>
+                    <option>DELETE</option>
+                  </select></label>
+                <label class="block text-sm col-span-3"><span class="text-slate-400">{{ t('field_http_url') }}</span>
+                  <input v-model="step.url"
+                    class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm" /></label>
+              </div>
+              <label class="block text-sm"><span class="text-slate-400">{{ t('field_http_headers') }}</span>
+                <textarea v-model="step.headers" rows="2"
+                  class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
+              <label class="flex items-center gap-2 text-sm">
+                <input type="checkbox" v-model="step.body_from_payload" /> {{ t('field_body_from_payload') }}
+              </label>
+              <label class="block text-sm"><span class="text-slate-400">{{ t('field_http_body') }}</span>
+                <textarea v-model="step.body" rows="2" :disabled="step.body_from_payload" :placeholder="payloadPlaceholder"
+                  class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs disabled:opacity-50"></textarea></label>
+              <field-hint :text="t('help_http_body')"></field-hint>
+            </template>
+
+            <template v-else-if="step.kind === 'transform'">
+              <field-hint :text="t('help_transform_section')"></field-hint>
+              <label class="block text-sm"><span class="text-slate-400">{{ t('field_transform_script') }}</span>
+                <textarea v-model="step.script" rows="4"
+                  class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
+              <collapse-panel :title="t('help_transform_examples')" v-model:open="showTransformExamples">
+                <field-hint :text="t('help_transform_rules')"></field-hint>
+                <div v-for="ex in transformExamples" :key="ex.id"
+                  class="rounded border border-slate-800 bg-slate-900/50 p-1.5 space-y-1">
+                  <div class="text-xs text-slate-200">{{ t(ex.titleKey) }}</div>
+                  <div class="text-[11px] text-slate-400">{{ t(ex.descKey) }}</div>
+                  <pre class="text-[11px] font-mono text-slate-300 bg-slate-950 rounded p-1.5 overflow-x-auto whitespace-pre-wrap">{{ ex.code }}</pre>
+                  <button type="button" @click="applyTransformExample(ex.code, idx)"
+                    class="text-[11px] text-cyan-400 hover:text-cyan-300 hover:underline">{{ t('btn_insert_example') }}</button>
+                </div>
+              </collapse-panel>
+            </template>
+
+            <template v-else-if="step.kind === 'command'">
+              <field-hint :text="t('help_command_section')"></field-hint>
+              <label class="block text-sm"><span class="text-slate-400">{{ t('field_command_program') }}</span>
+                <input v-model="step.program"
+                  class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm font-mono" /></label>
+              <label class="block text-sm"><span class="text-slate-400">{{ t('field_command_args') }}</span>
+                <textarea :value="(step.args || []).join(' ')" @input="setStepArgs(step, $event.target.value)"
+                  rows="2" placeholder="-t processor"
+                  class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
+              <label class="block text-sm"><span class="text-slate-400">{{ t('field_command_cwd') }}</span>
+                <input v-model="step.cwd"
+                  class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm font-mono" /></label>
+            </template>
           </div>
-          <label class="block text-sm"><span class="text-slate-400">{{ t('field_send_headers') }}</span>
-            <textarea v-model="form.send_headers" rows="2"
-              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
-          <label class="block text-sm"><span class="text-slate-400">{{ t('field_send_body') }}</span>
-            <textarea v-model="form.send_body_template" rows="2" :placeholder="payloadPlaceholder"
-              class="w-full mt-0.5 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 font-mono text-xs"></textarea></label>
-          <field-hint :text="t('help_send_body')"></field-hint>
         </fieldset>
           </div>
         </div>
@@ -459,7 +486,6 @@
             </div>
             <div class="px-4 pt-3 space-y-2 shrink-0">
               <p class="text-[11px] text-slate-500 leading-snug">{{ previewInfoText() }}</p>
-              <p v-if="detailsModal.truncated" class="text-xs text-amber-200/90 bg-amber-950/50 border border-amber-800/60 rounded px-3 py-2 leading-snug">{{ truncatedNoticeText() }}</p>
             </div>
             <pre class="px-4 pb-4 overflow-auto text-xs font-mono whitespace-pre-wrap break-words text-slate-300 flex-1 min-h-0">{{ detailsModal.body }}</pre>
             <div class="px-4 py-2 border-t border-slate-800 flex justify-end">
@@ -486,6 +512,9 @@
           return 'text-slate-300';
         },
         detailsRaw(log) {
+          if (log.steps_log && log.steps_log.length) {
+            return JSON.stringify(log.steps_log, null, 2);
+          }
           if (log.status === 'failed') return log.error_message || '';
           if (log.status === 'succeeded') return log.response_preview || '';
           return log.error_message || log.response_preview || '';
@@ -505,21 +534,11 @@
           return 'text-slate-500';
         },
         fillTemplate(key) {
-          const max = String(this.previewMaxBytes ?? 500);
+          const max = String(this.previewMaxBytes ?? 10485760);
           return (this.t(key) || key).replace(/\{\{max\}\}/g, max);
         },
         previewInfoText() {
           return this.fillTemplate('log_details_preview_info');
-        },
-        truncatedNoticeText() {
-          return this.fillTemplate('log_details_truncated_notice');
-        },
-        isStoredPreviewTruncated(log) {
-          if (log.preview_truncated) return true;
-          const raw = log.response_preview;
-          if (!raw || !String(raw).trim()) return false;
-          const s = String(raw);
-          return s.endsWith('…') && new TextEncoder().encode(s).length >= (this.previewMaxBytes || 500);
         },
         openDetails(log) {
           const raw = this.detailsRaw(log);
@@ -529,7 +548,7 @@
             open: true,
             title: `${this.t('log_details_modal_title')} — ${name} (${status})`,
             body: formatDetailsBody(raw),
-            truncated: this.isStoredPreviewTruncated(log),
+            truncated: false,
           };
           this._detailsEscHandler = (e) => {
             if (e.key === 'Escape') this.closeDetails();
@@ -611,7 +630,7 @@
           showTransformExamples: false,
           error: '',
           toast: '',
-          previewMaxBytes: 500,
+          previewMaxBytes: 10485760,
           jobFilters: {
             name: '',
             group: '',
@@ -769,8 +788,8 @@
         async loadSettings() {
           try {
             const s = await this.api('/api/settings');
-            if (s?.log_response_preview_max_bytes != null) {
-              this.previewMaxBytes = s.log_response_preview_max_bytes;
+            if (s?.max_step_output_bytes != null) {
+              this.previewMaxBytes = s.max_step_output_bytes;
             }
           } catch { /* keep default */ }
         },
@@ -828,9 +847,32 @@
         applyCronExample(expr) {
           this.form.schedule_value = expr;
         },
-        applyTransformExample(code) {
-          this.form.transform_enabled = true;
-          this.form.transform_script = code;
+        applyTransformExample(code, stepIdx) {
+          const idx = stepIdx ?? this.form.steps.findIndex((s) => s.kind === 'transform');
+          if (idx >= 0) {
+            this.form.steps[idx].script = code;
+          } else {
+            const step = newStep('transform');
+            step.script = code;
+            this.form.steps.push(step);
+          }
+        },
+        addStep(kind) {
+          this.form.steps.push(newStep(kind));
+        },
+        removeStep(idx) {
+          this.form.steps.splice(idx, 1);
+        },
+        moveStep(idx, delta) {
+          const to = idx + delta;
+          if (to < 0 || to >= this.form.steps.length) return;
+          const arr = this.form.steps;
+          const tmp = arr[idx];
+          arr[idx] = arr[to];
+          arr[to] = tmp;
+        },
+        setStepArgs(step, text) {
+          step.args = splitCommandArgs(text);
         },
         syncOneTimeToSchedule() {
           if (this.oneTimeLocal) {
@@ -908,18 +950,21 @@
             enabled: job.enabled,
             schedule_type: job.schedule_type,
             schedule_value: job.schedule_value,
-            fetch_enabled: job.fetch_enabled,
-            fetch_method: job.fetch_method || 'GET',
-            fetch_url: job.fetch_url || '',
-            fetch_headers: job.fetch_headers || '',
-            fetch_body: job.fetch_body || '',
-            transform_enabled: job.transform_enabled,
-            transform_script: job.transform_script || 'return input;',
-            send_enabled: job.send_enabled,
-            send_method: job.send_method || 'POST',
-            send_url: job.send_url || '',
-            send_headers: job.send_headers || '',
-            send_body_template: job.send_body_template || '{{payload}}',
+            steps: (job.steps || []).map((s) => ({
+              id: s.id || crypto.randomUUID(),
+              kind: s.kind,
+              name: s.name || '',
+              method: s.method || 'GET',
+              url: s.url || '',
+              headers: s.headers || '{}',
+              body: s.body || '',
+              body_from_payload: !!s.body_from_payload,
+              script: s.script || 'return input;',
+              program: s.program || '',
+              args: Array.isArray(s.args) ? s.args : [],
+              cwd: s.cwd || '',
+              capture_output: s.capture_output !== false,
+            })),
             retry_enabled: job.retry_enabled,
             max_retries: job.max_retries ?? 3,
             retry_interval_seconds: job.retry_interval_seconds ?? 60,
@@ -1024,6 +1069,34 @@
       },
     }).mount('#app');
 
+    /** Разбивает строку аргументов по пробелам/переносам: `-t processor` → ["-t","processor"]. */
+    function splitCommandArgs(text) {
+      return String(text || '').trim().split(/\s+/).filter(Boolean);
+    }
+
+    function newStep(kind) {
+      const id = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random();
+      if (kind === 'transform') {
+        return {
+          id, kind: 'transform', name: 'Transform',
+          method: null, url: '', headers: '{}', body: '', body_from_payload: false,
+          script: 'return input;', program: '', args: [], cwd: '', capture_output: true,
+        };
+      }
+      if (kind === 'command') {
+        return {
+          id, kind: 'command', name: 'Command',
+          method: null, url: '', headers: '{}', body: '', body_from_payload: false,
+          script: '', program: '', args: [], cwd: '', capture_output: true,
+        };
+      }
+      return {
+        id, kind: 'http', name: 'HTTP',
+        method: 'GET', url: '', headers: '{}', body: '', body_from_payload: false,
+        script: '', program: '', args: [], cwd: '', capture_output: true,
+      };
+    }
+
     function defaultForm() {
       return {
         name: '',
@@ -1032,18 +1105,7 @@
         enabled: false,
         schedule_type: 'interval',
         schedule_value: '5m',
-        fetch_enabled: true,
-        fetch_method: 'GET',
-        fetch_url: '',
-        fetch_headers: '{}',
-        fetch_body: '',
-        transform_enabled: false,
-        transform_script: 'return input;',
-        send_enabled: false,
-        send_method: 'POST',
-        send_url: '',
-        send_headers: '{}',
-        send_body_template: '{{payload}}',
+        steps: [newStep('http')],
         retry_enabled: true,
         max_retries: 3,
         retry_interval_seconds: 60,

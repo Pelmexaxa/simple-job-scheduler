@@ -5,14 +5,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     enabled INTEGER NOT NULL,
     schedule_type TEXT NOT NULL,
     schedule_value TEXT NOT NULL,
-    fetch_enabled INTEGER NOT NULL,
+    steps TEXT NOT NULL DEFAULT '[]',
+    fetch_enabled INTEGER NOT NULL DEFAULT 0,
     fetch_method TEXT,
     fetch_url TEXT,
     fetch_headers TEXT,
     fetch_body TEXT,
-    transform_enabled INTEGER NOT NULL,
+    transform_enabled INTEGER NOT NULL DEFAULT 0,
     transform_script TEXT,
-    send_enabled INTEGER NOT NULL,
+    send_enabled INTEGER NOT NULL DEFAULT 0,
     send_method TEXT,
     send_url TEXT,
     send_headers TEXT,
@@ -37,6 +38,8 @@ CREATE TABLE IF NOT EXISTS execution_logs (
     duration_ms INTEGER,
     error_message TEXT,
     response_preview TEXT,
+    preview_truncated INTEGER NOT NULL DEFAULT 0,
+    steps_log TEXT,
     FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
 );
 

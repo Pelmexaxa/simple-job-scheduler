@@ -1,31 +1,24 @@
 //! Валидация тела запроса на создание/обновление задачи.
 
 use crate::i18n::{LogLang, ValMsg};
-use crate::models::{JOB_GROUP_MAX_LEN, JobInput, ScheduleType, normalize_job_group};
+use crate::models::{
+    normalize_job_group, JobInput, JobStep, ScheduleType, StepKind, JOB_GROUP_MAX_LEN,
+};
 use crate::scheduler::{parse_cron_schedule, parse_interval};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-/// Проверяет поля задачи; секции с выключенной галочкой не проверяются.
+/// Проверяет поля задачи и каждый шаг пайплайна.
 pub fn validate_job(input: &JobInput, lang: LogLang) -> Result<(), String> {
     if input.name.trim().is_empty() {
         return Err(ValMsg::NameRequired.text(lang).to_string());
     }
 
     validate_job_group(input, lang)?;
-
     validate_schedule(input, lang)?;
 
-    if input.fetch_enabled {
-        validate_fetch(input, lang)?;
-    }
-
-    if input.transform_enabled {
-        validate_transform(input, lang)?;
-    }
-
-    if input.send_enabled {
-        validate_send(input, lang)?;
+    for step in &input.steps {
+        validate_step(step, lang)?;
     }
 
     if input.retry_enabled {
@@ -73,59 +66,47 @@ fn validate_schedule(input: &JobInput, lang: LogLang) -> Result<(), String> {
     }
 }
 
-fn validate_fetch(input: &JobInput, lang: LogLang) -> Result<(), String> {
-    let url = non_empty(input.fetch_url.as_ref())
-        .ok_or_else(|| ValMsg::FetchUrlRequired.text(lang).to_string())?;
+fn validate_step(step: &JobStep, lang: LogLang) -> Result<(), String> {
+    match step.kind {
+        StepKind::Http => validate_http_step(step, lang),
+        StepKind::Transform => {
+            if non_empty(step.script.as_ref()).is_none() {
+                return Err(ValMsg::TransformScriptRequired.text(lang).to_string());
+            }
+            Ok(())
+        }
+        StepKind::Command => {
+            if non_empty(step.program.as_ref()).is_none() {
+                return Err(ValMsg::CommandProgramRequired.text(lang).to_string());
+            }
+            for arg in &step.args {
+                if arg.contains('\0') {
+                    return Err(ValMsg::CommandArgInvalid.text(lang).to_string());
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_http_step(step: &JobStep, lang: LogLang) -> Result<(), String> {
+    let url = non_empty(step.url.as_ref())
+        .ok_or_else(|| ValMsg::HttpUrlRequired.text(lang).to_string())?;
     if !is_http_url(url) {
-        return Err(ValMsg::FetchUrlInvalid.text(lang).to_string());
+        return Err(ValMsg::HttpUrlInvalid.text(lang).to_string());
     }
 
-    let method = input
-        .fetch_method
+    let method = step
+        .method
         .as_deref()
         .unwrap_or("GET")
         .trim()
         .to_uppercase();
-    if method != "GET" && method != "POST" {
-        return Err(ValMsg::FetchMethodInvalid.text(lang).to_string());
+    if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE") {
+        return Err(ValMsg::HttpMethodInvalid.text(lang).to_string());
     }
 
-    validate_json_object(
-        input.fetch_headers.as_ref(),
-        ValMsg::FetchHeadersInvalid,
-        lang,
-    )
-}
-
-fn validate_transform(input: &JobInput, lang: LogLang) -> Result<(), String> {
-    if non_empty(input.transform_script.as_ref()).is_none() {
-        return Err(ValMsg::TransformScriptRequired.text(lang).to_string());
-    }
-    Ok(())
-}
-
-fn validate_send(input: &JobInput, lang: LogLang) -> Result<(), String> {
-    let url = non_empty(input.send_url.as_ref())
-        .ok_or_else(|| ValMsg::SendUrlRequired.text(lang).to_string())?;
-    if !is_http_url(url) {
-        return Err(ValMsg::SendUrlInvalid.text(lang).to_string());
-    }
-
-    let method = input
-        .send_method
-        .as_deref()
-        .unwrap_or("POST")
-        .trim()
-        .to_uppercase();
-    if method != "POST" && method != "PUT" {
-        return Err(ValMsg::SendMethodInvalid.text(lang).to_string());
-    }
-
-    validate_json_object(
-        input.send_headers.as_ref(),
-        ValMsg::SendHeadersInvalid,
-        lang,
-    )
+    validate_json_object(step.headers.as_ref(), ValMsg::HttpHeadersInvalid, lang)
 }
 
 fn validate_retry(input: &JobInput, lang: LogLang) -> Result<(), String> {
@@ -160,7 +141,11 @@ fn validate_json_object(raw: Option<&String>, msg: ValMsg, lang: LogLang) -> Res
 fn non_empty(value: Option<&String>) -> Option<&str> {
     value.and_then(|s| {
         let t = s.trim();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     })
 }
 
@@ -184,7 +169,7 @@ fn parse_one_time(value: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ScheduleType;
+    use crate::models::{JobStep, ScheduleType, StepKind};
 
     fn base_input() -> JobInput {
         JobInput {
@@ -194,18 +179,7 @@ mod tests {
             enabled: true,
             schedule_type: ScheduleType::Interval,
             schedule_value: "5m".to_string(),
-            fetch_enabled: false,
-            fetch_method: None,
-            fetch_url: None,
-            fetch_headers: None,
-            fetch_body: None,
-            transform_enabled: false,
-            transform_script: None,
-            send_enabled: false,
-            send_method: None,
-            send_url: None,
-            send_headers: None,
-            send_body_template: None,
+            steps: Vec::new(),
             retry_enabled: false,
             max_retries: None,
             retry_interval_seconds: None,
@@ -220,18 +194,39 @@ mod tests {
     }
 
     #[test]
-    fn fetch_requires_url_when_enabled() {
+    fn http_requires_url() {
         let mut input = base_input();
-        input.fetch_enabled = true;
-        input.fetch_url = Some(String::new());
+        let mut step = JobStep::new_http();
+        step.url = Some(String::new());
+        input.steps.push(step);
         assert!(validate_job(&input, LogLang::En).is_err());
     }
 
     #[test]
-    fn skips_fetch_when_disabled() {
-        let mut input = base_input();
-        input.fetch_url = None;
+    fn accepts_empty_steps() {
+        let input = base_input();
         assert!(validate_job(&input, LogLang::En).is_ok());
+    }
+
+    #[test]
+    fn command_requires_program() {
+        let mut input = base_input();
+        input.steps.push(JobStep {
+            id: "1".into(),
+            kind: StepKind::Command,
+            name: None,
+            method: None,
+            url: None,
+            headers: None,
+            body: None,
+            body_from_payload: false,
+            script: None,
+            program: None,
+            args: vec![],
+            cwd: None,
+            capture_output: true,
+        });
+        assert!(validate_job(&input, LogLang::En).is_err());
     }
 
     #[test]
